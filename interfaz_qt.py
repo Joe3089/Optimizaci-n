@@ -398,11 +398,11 @@ class InterfazOptimizacion(QMainWindow):
             # Guardar resultado para exportación (sin depender de pandas)
             img_path = self._save_plot_image(metodo, f, history)
             item = ReportItem(
-                metodo=metodo,
                 funcion=expr,
+                metodo=metodo,
+                iteraciones=history,   # lista de dicts
                 resumen=resumen,
-                tabla=history,   # lista de dicts
-                image_path=img_path
+                grafica_path=img_path
             )
             self._results.setdefault(expr, {})[metodo] = {"resumen": resumen, "history": history, "item": item}
 
@@ -511,7 +511,7 @@ class InterfazOptimizacion(QMainWindow):
 
     # ---------------- Export ----------------
     def exportar_csv(self):
-        expr = self.func_input.text().strip()
+        expr = (getattr(self, "_current_expr", "") or self.func_input.text()).strip()
         if not expr or expr not in self._results or not self._results[expr]:
             self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
             return
@@ -544,7 +544,7 @@ class InterfazOptimizacion(QMainWindow):
         self._show_msg("Éxito", "Archivo CSV exportado exitosamente.", icon=QMessageBox.Information)
 
     def exportar_excel(self):
-        expr = self.func_input.text().strip()
+        expr = (getattr(self, "_current_expr", "") or self.func_input.text()).strip()
         if not expr or expr not in self._results or not self._results[expr]:
             self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
             return
@@ -560,7 +560,7 @@ class InterfazOptimizacion(QMainWindow):
             return
 
         try:
-            export_reporte_excel(filepath, items, app_title="Optimizador de Funciones")
+            export_reporte_excel(items, output_path=filepath, app_title="Optimizador de Funciones")
             self._show_msg("Éxito", "Reporte Excel exportado exitosamente.", icon=QMessageBox.Information)
         except Exception as e:
             # si falla, reportar claro (texto negro en QMessageBox por defecto)
