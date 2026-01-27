@@ -30,6 +30,29 @@ class Rotating3DCanvas(FigureCanvas):
         except Exception:
             pass
 
+
+    def set_data(self, iters, xs, zs):
+        """Actualiza la curva 3D (iteración, x, f(x)) en el dashboard."""
+        self.ax.cla()
+        self.ax.plot(iters, xs, zs, linewidth=2)
+        if len(iters) > 0:
+            self.ax.scatter([iters[-1]], [xs[-1]], [zs[-1]], s=35)
+        self.ax.set_title("Gráfica 3D")
+        self.ax.set_xlabel("Iteración")
+        self.ax.set_ylabel("x")
+        self.ax.set_zlabel("f(x)")
+        self.draw_idle()
+
+    def start_rotation(self):
+        """Inicia la rotación automática (si está detenida)."""
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop_rotation(self):
+        """Detiene la rotación automática."""
+        if self._timer.isActive():
+            self._timer.stop()
+
     def clear(self):
         self.ax.cla()
         self.draw_idle()

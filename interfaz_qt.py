@@ -398,11 +398,11 @@ class InterfazOptimizacion(QMainWindow):
             # Guardar resultado para exportación (sin depender de pandas)
             img_path = self._save_plot_image(metodo, f, history)
             item = ReportItem(
-                funcion=expr,
                 metodo=metodo,
-                iteraciones=history,   # lista de dicts
+                funcion=expr,
                 resumen=resumen,
-                grafica_path=img_path
+                tabla=history,   # lista de dicts
+                image_path=img_path
             )
             self._results.setdefault(expr, {})[metodo] = {"resumen": resumen, "history": history, "item": item}
 
