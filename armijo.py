@@ -42,3 +42,40 @@ def armijo_search(func, x0, alpha0=1.0, rho=0.5, c=1e-4, max_iter=50, return_his
     if return_history:
         return out + (history,)
     return out
+
+# ---------------------------------------------------------------------
+# Compatibilidad con versiones anteriores del proyecto:
+# Algunos módulos/interfaz intentan importar `metodo_armijo`.
+# Este wrapper usa `armijo_search` (minimización) desde un x0 dentro del rango [a,b].
+def metodo_armijo(func, a, b, alpha0=1.0, rho=0.5, c=1e-4, max_iter=50, return_history=True):
+    """Wrapper compatible.
+
+    Parámetros:
+      func: función f(x)
+      a,b: rango (se usa x0 = (a+b)/2)
+      return_history:
+        - True  -> retorna la tabla de iteraciones (list[dict]) para mostrar en la UI
+        - False -> retorna (x_new, f_new, iteraciones, distancia)
+
+    Nota: `armijo_search` implementa backtracking Armijo para MINIMIZACIÓN.
+    """
+    a = float(a)
+    b = float(b)
+    x0 = (a + b) / 2.0
+
+    out = armijo_search(
+        func,
+        x0,
+        alpha0=alpha0,
+        rho=rho,
+        c=c,
+        max_iter=max_iter,
+        return_history=True
+    )
+
+    # out: (x_new, f_new, iteraciones, distancia, history)
+    x_new, f_new, iters, distancia, history = out
+
+    if return_history:
+        return history
+    return (x_new, f_new, iters, distancia)

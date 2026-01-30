@@ -9,21 +9,52 @@ from typing import Callable, Dict, List, Any, Optional
 import numpy as np
 import csv
 
+# Métodos (con compatibilidad: algunos archivos definen wrappers metodo_* )
+try:
+    from busqueda_local import busqueda_local
+except Exception:  # pragma: no cover
+    busqueda_local = None
+
+try:
+    from fibonacci import metodo_fibonacci, fibonacci_search
+except Exception:  # pragma: no cover
+    metodo_fibonacci = None
+    fibonacci_search = None
+
+try:
+    from armijo import metodo_armijo, armijo_search
+except Exception:  # pragma: no cover
+    metodo_armijo = None
+    armijo_search = None
+
+try:
+    from wolfe import metodo_wolfe, wolfe_search
+except Exception:  # pragma: no cover
+    metodo_wolfe = None
+    wolfe_search = None
+
+try:
+    from rotacion_3d import Rotating3DCanvas
+except Exception:  # pragma: no cover
+    Rotating3DCanvas = None
+
+try:
+    from reporte_export import ReportItem, exportar_reporte_excel, exportar_reporte_pdf
+except Exception:  # pragma: no cover
+    ReportItem = None
+    exportar_reporte_excel = None
+    exportar_reporte_pdf = None
+
+
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QIcon, QPixmap, QColor, QBrush
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox, QLineEdit,
     QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QMessageBox,
-    QFileDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QSpacerItem
+    QFileDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QSpacerItem, QMenu, QToolButton, QAction
 )
 
-from busqueda_local import busqueda_local
-from fibonacci import fibonacci_search
-from armijo import armijo_search
-from wolfe import wolfe_search
 
-from rotacion_3d import Rotating3DCanvas
-from reporte_export import ReportItem, export_reporte_excel
 
 
 SAFE_MATH = {
@@ -60,10 +91,13 @@ class InterfazOptimizacion(QMainWindow):
       incluyendo tabla + imagen de la gráfica.
     """
 
-    def __init__(self, resource_path_base: str = "."):
+    def __init__(self, resource_path_base: str = ".", resource_path: str = None):
         super().__init__()
-        self.resource_base = resource_path_base
+        # Compatibilidad con código que usa resource_path
+        if resource_path is not None:
+            resource_path_base = resource_path
 
+        
         # estado: expr -> method -> data
         self._results: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._current_expr: str = ""
@@ -147,25 +181,47 @@ class InterfazOptimizacion(QMainWindow):
         # Buttons
         btn_row1 = QHBoxLayout()
         self.btn_calc = QPushButton("Calcular")
+        self.btn_calc.setFixedHeight(44)
+        self.btn_calc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_calc.clicked.connect(self.ejecutar_metodo)
         self.btn_clear = QPushButton("Limpiar")
+        self.btn_clear.setFixedHeight(44)
+        self.btn_clear.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_clear.clicked.connect(self.limpiar)
         btn_row1.addWidget(self.btn_calc)
         btn_row1.addWidget(self.btn_clear)
+        btn_row1.setStretch(0, 1)
+        btn_row1.setStretch(1, 1)
         left_layout.addLayout(btn_row1)
 
         btn_row2 = QHBoxLayout()
-        self.btn_csv = QPushButton("Exportar CSV")
-        self.btn_csv.clicked.connect(self.exportar_csv)
-        self.btn_excel = QPushButton("Exportar Excel")
-        self.btn_excel.clicked.connect(self.exportar_excel)
-        btn_row2.addWidget(self.btn_csv)
-        btn_row2.addWidget(self.btn_excel)
-        left_layout.addLayout(btn_row2)
 
+        # Exportar (botón con menú desplegable)
+        self.export_btn = QToolButton()
+        self.export_btn.setObjectName("exportButton")
+        self.export_btn.setText("Exportar")
+        self.export_btn.setFixedHeight(44)
+        self.export_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.export_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.export_btn.setPopupMode(QToolButton.InstantPopup)
+
+        export_menu = QMenu(self.export_btn)
+        export_menu.addAction("Exportar CSV", self.exportar_csv)
+        export_menu.addAction("Exportar Excel", self.exportar_excel)
+        export_menu.addAction("Exportar PDF", self.exportar_pdf)
+        self.export_btn.setMenu(export_menu)
+
+        # Salir (mismo tamaño que Calcular)
         self.btn_exit = QPushButton("Salir")
-        self.btn_exit.clicked.connect(self.close)
-        left_layout.addWidget(self.btn_exit)
+        self.btn_exit.setFixedHeight(44)
+        self.btn_exit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_exit.clicked.connect(self._confirm_exit)
+
+        btn_row2.addWidget(self.export_btn)
+        btn_row2.addWidget(self.btn_exit)
+        btn_row2.setStretch(0, 1)
+        btn_row2.setStretch(1, 1)
+        left_layout.addLayout(btn_row2)
 
         # status line
         self.status_lbl = QLabel("")
@@ -187,8 +243,14 @@ class InterfazOptimizacion(QMainWindow):
 
         self.table = QTableWidget()
         self.table.setObjectName("resultTable")
+        self.table.setAlternatingRowColors(False)
         self.table.setColumnCount(0)
         self.table.setRowCount(0)
+        # Mejoras UI: ocultar numeración de filas (recuadro rojo) y hacer cabeceras legibles
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(True)
         right_layout.addWidget(self.table, 2)
 
         self.plot_frame = QFrame()
@@ -207,6 +269,7 @@ class InterfazOptimizacion(QMainWindow):
         root.addWidget(self.left_panel)
         root.addWidget(self.right_panel, 1)
 
+        self._install_spanish_context_menus()
         self.resize(1200, 700)
 
     def _apply_styles(self):
@@ -246,21 +309,54 @@ class InterfazOptimizacion(QMainWindow):
         QPushButton:hover { background-color: rgba(0, 140, 255, 0.70); }
         QPushButton:pressed { background-color: rgba(0, 140, 255, 0.85); }
 
+
+        QToolButton#exportButton {
+            background-color: rgba(0, 140, 255, 0.55);
+            color: white;
+            border: 0px;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font-weight: 700;
+        }
+        QToolButton#exportButton:hover { background-color: rgba(0, 140, 255, 0.70); }
+        QToolButton#exportButton:pressed { background-color: rgba(0, 140, 255, 0.85); }
+
+        QComboBox#exportCombo {
+            background-color: rgba(0, 140, 255, 0.55);
+            color: white;
+            border: 0px;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font-weight: 700;
+            min-height: 30px;
+        }
+        QComboBox#exportCombo:hover { background-color: rgba(0, 140, 255, 0.70); }
+        QComboBox#exportCombo::drop-down { border: 0px; width: 30px; }
+        QComboBox#exportCombo::down-arrow { /* default arrow */ }
+
+
         QTableWidget#resultTable {
-            background-color: rgba(0,0,0,0.25);
+            alternate-background-color: rgba(0,0,0,0.45);
+            background-color: rgba(0,0,0,0.55);
             color: white;
             gridline-color: rgba(255,255,255,0.10);
             border: 1px solid rgba(255,255,255,0.15);
             border-radius: 12px;
         }
         QHeaderView::section {
-            background-color: rgba(255,255,255,0.08);
+            background-color: rgba(0,0,0,0.55);
             color: white;
             border: 0px;
             padding: 6px;
             font-weight: 700;
         }
-        QTableWidget::item { padding: 4px; }
+        QTableCornerButton::section {
+            background-color: rgba(0,0,0,0.55);
+            border: 0px;
+        }
+        QTableWidget::item { padding: 4px; background-color: rgba(0,0,0,0.35); color: white; }
+        QTableWidget::item:alternate { background-color: rgba(0,0,0,0.35); }
+        QTableWidget::item:disabled { color: rgba(255,255,255,0.75); }
         QTableWidget::item:selected { background-color: rgba(0, 140, 255, 0.30); }
 
         QLabel#plotPlaceholder { color: rgba(255,255,255,0.85); }
@@ -363,60 +459,66 @@ class InterfazOptimizacion(QMainWindow):
             a, b, x0, paso, max_iter = params["a"], params["b"], params["x0"], params["paso"], params["max_iter"]
 
             metodo = self.metodo_menu.currentText()
-            history: List[Dict[str, Any]] = []
-            resumen: Dict[str, Any] = {"metodo": metodo, "funcion": expr}
 
+            # Ejecutar método con compatibilidad
             if metodo == "Búsqueda Local":
-                resumen_out, history = busqueda_local(f, x0=x0, paso=paso, max_iter=max_iter)
-                resumen.update(resumen_out)
+                if busqueda_local is None:
+                    raise ImportError("No se pudo importar busqueda_local()")
+                out = busqueda_local(f, x0=x0, paso=paso, max_iter=max_iter, tolerancia=1e-5, return_history=True)
 
             elif metodo == "Fibonacci":
                 tol = float(self.tol_spin.value())
-                x_opt, f_opt, history = fibonacci_search(f, a=a, b=b, tolerance=tol, max_iter=max_iter, return_history=True)
-                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "a": a, "b": b, "tolerance": tol, "iter": len(history)})
+                fn = metodo_fibonacci if metodo_fibonacci is not None else fibonacci_search
+                if fn is None:
+                    raise ImportError("No se pudo importar metodo_fibonacci()/fibonacci_search()")
+                out = fn(f, a=a, b=b, tolerancia=tol, max_n=max_iter, return_history=True)
 
             elif metodo == "Armijo":
-                x_opt, f_opt, alpha, history = armijo_search(
-                    f, x0=x0, alpha0=1.0, rho=0.5, c=1e-4, max_iter=max_iter, return_history=True
-                )
-                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "alpha": alpha, "iter": len(history)})
+                if metodo_armijo is not None:
+                    out = metodo_armijo(f, a=a, b=b, max_iter=max_iter, return_history=True)
+                elif armijo_search is not None:
+                    x_new, f_new, iters, dist, hist = armijo_search(f, x0=x0, alpha0=1.0, rho=0.5, c=1e-4, max_iter=max_iter, return_history=True)
+                    out = (x_new, f_new, iters, dist, hist)
+                else:
+                    raise ImportError("No se pudo importar metodo_armijo()/armijo_search()")
 
             elif metodo == "Wolfe":
-                x_opt, f_opt, alpha, history = wolfe_search(
-                    f, x0=x0, alpha0=1.0, c1=1e-4, c2=0.9, max_iter=max_iter, return_history=True
-                )
-                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "alpha": alpha, "iter": len(history)})
-
+                if metodo_wolfe is not None:
+                    out = metodo_wolfe(f, a=a, b=b, max_iter=max_iter, return_history=True)
+                elif wolfe_search is not None:
+                    x_new, f_new, iters, dist, hist = wolfe_search(f, x0=x0, alpha0=1.0, rho=0.5, c1=1e-4, c2=0.9, max_iter=max_iter, return_history=True)
+                    out = (x_new, f_new, iters, dist, hist)
+                else:
+                    raise ImportError("No se pudo importar metodo_wolfe()/wolfe_search()")
             else:
                 raise ValueError("Método no soportado.")
+
+            parsed = self._parse_method_output(metodo, out)
+            resumen = parsed["resumen"]
+            history = parsed["history"]
 
             # actualizar tabla + gráfica
             self._current_expr = expr
             self._update_table(history)
             self._render_plot(metodo, f, history)
 
-            # Guardar resultado para exportación (sin depender de pandas)
+            # Guardar para exportación
             img_path = self._save_plot_image(metodo, f, history)
-            item = ReportItem(
-                metodo=metodo,
-                funcion=expr,
-                resumen=resumen,
-                tabla=history,   # lista de dicts
-                image_path=img_path
-            )
+            if ReportItem is not None:
+                item = ReportItem(funcion=expr, metodo=metodo, iteraciones=history, resumen=resumen, grafica_path=img_path)
+            else:
+                item = None
+
             self._results.setdefault(expr, {})[metodo] = {"resumen": resumen, "history": history, "item": item}
 
             # status
             if "x_opt" in resumen and "f_opt" in resumen:
-                self.status_lbl.setText(f"✓ {metodo} → x*={resumen['x_opt']:.6g}, f(x*)={resumen['f_opt']:.6g}")
-            else:
-                # búsqueda local devuelve x_max/f_max
-                xk = resumen.get("x_max", resumen.get("x_min", None))
-                fk = resumen.get("f_max", resumen.get("f_min", None))
-                if xk is not None and fk is not None:
-                    self.status_lbl.setText(f"✓ {metodo} → x={xk:.6g}, f(x)={fk:.6g}")
-                else:
+                try:
+                    self.status_lbl.setText(f"✓ {metodo} → x*={float(resumen['x_opt']):.6g}, f(x*)={float(resumen['f_opt']):.6g}")
+                except Exception:
                     self.status_lbl.setText(f"✓ {metodo} ejecutado.")
+            else:
+                self.status_lbl.setText(f"✓ {metodo} ejecutado.")
 
         except Exception as e:
             self._show_msg("Error", f"Ocurrió un error al ejecutar el método:\n{e}", icon=QMessageBox.Critical)
@@ -438,6 +540,8 @@ class InterfazOptimizacion(QMainWindow):
                 val = row.get(col, "")
                 item = QTableWidgetItem(str(val))
                 item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+                item.setForeground(QBrush(QColor(255, 255, 255)))
+                item.setBackground(QBrush(QColor(0, 0, 0, 115)))
                 self.table.setItem(r, c, item)
 
         self.table.resizeColumnsToContents()
@@ -472,9 +576,15 @@ class InterfazOptimizacion(QMainWindow):
 
         self.plot_placeholder.hide()
 
-        if self._canvas is None:
-            self._canvas = Rotating3DCanvas(self.plot_frame, title=f"Gráfica 3D - {metodo}")
-            self.plot_layout.addWidget(self._canvas)
+        # Re-crear el canvas por ejecución para que SIEMPRE coincida con el método ejecutado
+        if self._canvas is not None:
+            self.plot_layout.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas = None
+
+        titulo = f"Gráfica 3D - {metodo}"
+        self._canvas = Rotating3DCanvas(self.plot_frame, title=titulo)
+        self.plot_layout.addWidget(self._canvas)
 
         self._canvas.set_data(iters, xs, zs)
         self._canvas.start_rotation()
@@ -510,8 +620,125 @@ class InterfazOptimizacion(QMainWindow):
             return None
 
     # ---------------- Export ----------------
+
+    def _confirm_exit(self):
+        m = QMessageBox(self)
+        m.setWindowTitle("Salir")
+        m.setIcon(QMessageBox.Question)
+        m.setText("¿Está seguro de que desea salir de la aplicación?")
+        m.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        m.setDefaultButton(QMessageBox.No)
+        # Texto y botones legibles (no heredar estilos oscuros globales)
+        m.setStyleSheet(
+            "QLabel{color:#111; font-size:12px;} "
+            "QPushButton{min-width:90px; min-height:30px; font-weight:600;}"
+        )
+        m.button(QMessageBox.Yes).setText("Sí")
+        m.button(QMessageBox.No).setText("No")
+        if m.exec_() == QMessageBox.Yes:
+            self.close()
+    def _on_export_selected(self, idx: int):
+        # idx 0 = "Exportar" (placeholder)
+        if idx <= 0:
+            return
+        choice = self.export_combo.currentText().strip().lower()
+        # volver al placeholder inmediatamente para que el combo actúe como botón desplegable
+        self.export_combo.blockSignals(True)
+        self.export_combo.setCurrentIndex(0)
+        self.export_combo.blockSignals(False)
+
+        if "csv" in choice:
+            self.exportar_csv()
+        elif "excel" in choice:
+            self.exportar_excel()
+        elif "pdf" in choice:
+            self.exportar_pdf()
+
+    def _coerce_history(self, history: Any) -> List[Dict[str, Any]]:
+        if history is None:
+            return []
+        if isinstance(history, list):
+            # asegurar dicts
+            out = []
+            for row in history:
+                if isinstance(row, dict):
+                    out.append(row)
+                elif isinstance(row, (list, tuple)):
+                    out.append({f"c{i+1}": v for i, v in enumerate(row)})
+                else:
+                    out.append({"value": row})
+            return out
+        if isinstance(history, tuple):
+            return self._coerce_history(list(history))
+        if isinstance(history, dict):
+            return [history]
+        return [{"value": history}]
+
+    def _parse_method_output(self, metodo: str, out: Any) -> Dict[str, Any]:
+        """Normaliza salidas de métodos a un dict: {'resumen':..., 'history':...}."""
+        metodo_norm = metodo.lower()
+        resumen: Dict[str, Any] = {"metodo": metodo, "funcion": self.func_input.text().strip()}
+
+        # Búsqueda Local: (x, f, iter, tipo, distancia[, history])
+        if "búsqueda" in metodo_norm or "busqueda" in metodo_norm:
+            if isinstance(out, (tuple, list)):
+                if len(out) >= 5:
+                    x_opt, f_opt, iters, tipo, dist = out[:5]
+                    resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "tipo": tipo, "distancia": dist})
+                history = out[5] if len(out) >= 6 else []
+            else:
+                history = []
+            return {"resumen": resumen, "history": self._coerce_history(history)}
+
+        # Fibonacci: (x_opt, f_opt, iter, tipo, distancia[, history, limit_reached, target])
+        if "fibonacci" in metodo_norm:
+            if isinstance(out, (tuple, list)) and len(out) >= 5:
+                x_opt, f_opt, iters, tipo, dist = out[:5]
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "tipo": tipo, "distancia": dist})
+                history = out[5] if len(out) >= 6 else []
+                if len(out) >= 7:
+                    resumen["limit_reached"] = bool(out[6])
+                if len(out) >= 8:
+                    resumen["target"] = out[7]
+            else:
+                history = []
+            return {"resumen": resumen, "history": self._coerce_history(history)}
+
+        # Armijo/Wolfe wrappers pueden devolver solo history cuando return_history=True
+        if "armijo" in metodo_norm or "wolfe" in metodo_norm:
+            if isinstance(out, list) and (len(out) == 0 or isinstance(out[0], dict)):
+                history = out
+                # intentar inferir x_opt/f_opt del último registro
+                if history:
+                    last = history[-1]
+                    for k in ("x_new", "x", "x_opt", "x*"):
+                        if k in last:
+                            try:
+                                resumen["x_opt"] = float(last[k])
+                                break
+                            except Exception:
+                                pass
+                    for k in ("f_new", "fx", "f(x)", "f_opt"):
+                        if k in last:
+                            try:
+                                resumen["f_opt"] = float(last[k])
+                                break
+                            except Exception:
+                                pass
+                    resumen["iter"] = len(history)
+                return {"resumen": resumen, "history": self._coerce_history(history)}
+            # si devuelve tuple: (x_new,f_new,iters,dist[,history])
+            if isinstance(out, (tuple, list)) and len(out) >= 4:
+                x_opt, f_opt, iters, dist = out[:4]
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "distancia": dist})
+                history = out[4] if len(out) >= 5 else []
+                return {"resumen": resumen, "history": self._coerce_history(history)}
+            return {"resumen": resumen, "history": []}
+
+        return {"resumen": resumen, "history": []}
+
     def exportar_csv(self):
-        expr = (getattr(self, "_current_expr", "") or self.func_input.text()).strip()
+        expr = self.func_input.text().strip()
         if not expr or expr not in self._results or not self._results[expr]:
             self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
             return
@@ -544,7 +771,7 @@ class InterfazOptimizacion(QMainWindow):
         self._show_msg("Éxito", "Archivo CSV exportado exitosamente.", icon=QMessageBox.Information)
 
     def exportar_excel(self):
-        expr = (getattr(self, "_current_expr", "") or self.func_input.text()).strip()
+        expr = self.func_input.text().strip()
         if not expr or expr not in self._results or not self._results[expr]:
             self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
             return
@@ -560,18 +787,109 @@ class InterfazOptimizacion(QMainWindow):
             return
 
         try:
-            export_reporte_excel(items, output_path=filepath, app_title="Optimizador de Funciones")
+            exportar_reporte_excel(items, output_path=filepath, app_title="Optimizador de Funciones")
             self._show_msg("Éxito", "Reporte Excel exportado exitosamente.", icon=QMessageBox.Information)
         except Exception as e:
             # si falla, reportar claro (texto negro en QMessageBox por defecto)
             self._show_msg("Error", f"No se pudo exportar el Excel:\n{e}", icon=QMessageBox.Critical)
 
+    def exportar_pdf(self):
+        expr = self.func_input.text().strip()
+        if not expr or expr not in self._results or not self._results[expr]:
+            self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
+            return
+        items: List[ReportItem] = []
+        for metodo, data in self._results[expr].items():
+            if data.get("item") is not None:
+                items.append(data["item"])
+        if exportar_reporte_pdf is None:
+            self._show_msg("Error", "No se pudo exportar el PDF: dependencia no disponible (reportlab).", icon=QMessageBox.Critical)
+            return
+        filepath, _ = QFileDialog.getSaveFileName(self, "Guardar Reporte PDF", "reporte_optimizacion.pdf", "PDF (*.pdf)")
+        if not filepath:
+            return
+        try:
+            exportar_reporte_pdf(items, output_path=filepath, app_title="Optimizador de Funciones")
+            self._show_msg("Éxito", "Reporte PDF exportado exitosamente.", icon=QMessageBox.Information)
+        except Exception as e:
+            self._show_msg("Error", f"No se pudo exportar el PDF:\n{e}", icon=QMessageBox.Critical)
+
     # ---------------- Helpers ----------------
+    def _install_spanish_context_menus(self):
+        # Tabla: menú contextual en español (Copiar, Seleccionar todo)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_context_menu)
+
+        # LineEdits relevantes: menú contextual en español (Cortar/Copiar/Pegar/Seleccionar todo)
+        edits = [self.func_input]
+        for sp in (self.min_spin, self.max_spin, self.tol_spin):
+            le = sp.lineEdit()
+            if le is not None:
+                edits.append(le)
+
+        for le in edits:
+            le.setContextMenuPolicy(Qt.CustomContextMenu)
+            le.customContextMenuRequested.connect(lambda pos, w=le: self._show_lineedit_context_menu(w, pos))
+
+    def _show_table_context_menu(self, pos):
+        menu = QMenu(self.table)
+        act_copy = menu.addAction("Copiar")
+        act_select_all = menu.addAction("Seleccionar todo")
+
+        sel = self.table.selectedRanges()
+        act_copy.setEnabled(bool(sel))
+
+        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if action == act_copy:
+            self._copy_table_selection()
+        elif action == act_select_all:
+            self.table.selectAll()
+
+    def _copy_table_selection(self):
+        sel = self.table.selectedRanges()
+        if not sel:
+            return
+        r = sel[0]
+        rows = []
+        for row in range(r.topRow(), r.bottomRow() + 1):
+            cols = []
+            for col in range(r.leftColumn(), r.rightColumn() + 1):
+                item = self.table.item(row, col)
+                cols.append("" if item is None else item.text())
+            rows.append("\t".join(cols))
+        QApplication.clipboard().setText("\n".join(rows))
+
+    def _show_lineedit_context_menu(self, widget, pos):
+        menu = QMenu(widget)
+        act_cut = menu.addAction("Cortar")
+        act_copy = menu.addAction("Copiar")
+        act_paste = menu.addAction("Pegar")
+        menu.addSeparator()
+        act_select_all = menu.addAction("Seleccionar todo")
+
+        has_sel = widget.hasSelectedText()
+        act_cut.setEnabled(has_sel and not widget.isReadOnly())
+        act_copy.setEnabled(has_sel)
+        act_paste.setEnabled(not widget.isReadOnly())
+
+        action = menu.exec_(widget.mapToGlobal(pos))
+        if action == act_cut:
+            widget.cut()
+        elif action == act_copy:
+            widget.copy()
+        elif action == act_paste:
+            widget.paste()
+        elif action == act_select_all:
+            widget.selectAll()
+
     def _show_msg(self, title: str, text: str, icon=QMessageBox.Warning):
-        # QMessageBox usa estilo del sistema (texto negro normalmente),
-        # para evitar letras blancas en mensajes.
+        # Forzar legibilidad: el stylesheet global pinta QLabel en blanco.
         m = QMessageBox(self)
         m.setWindowTitle(title)
         m.setText(text)
         m.setIcon(icon)
+        m.setStyleSheet("""
+            QLabel { color: #111; font-size: 12px; }
+            QPushButton { min-width: 90px; padding: 6px 14px; }
+        """)
         m.exec_()

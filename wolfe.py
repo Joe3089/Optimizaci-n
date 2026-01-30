@@ -45,3 +45,41 @@ def wolfe_search(func, x0, alpha0=1.0, rho=0.5, c1=1e-4, c2=0.9, max_iter=50, re
     if return_history:
         return out + (history,)
     return out
+
+# ---------------------------------------------------------------------
+# Compatibilidad con versiones anteriores del proyecto:
+# Algunos módulos/interfaz intentan importar `metodo_wolfe`.
+# Este wrapper usa `wolfe_search` desde un x0 dentro del rango [a,b].
+def metodo_wolfe(func, a, b, alpha0=1.0, rho=0.5, c1=1e-4, c2=0.9, max_iter=50, return_history=True):
+    """Wrapper compatible.
+
+    Parámetros:
+      func: función f(x)
+      a,b: rango (se usa x0 = (a+b)/2)
+      return_history:
+        - True  -> retorna la tabla de iteraciones (list[dict]) para mostrar en la UI
+        - False -> retorna (x_new, f_new, iteraciones, distancia)
+
+    Nota: `wolfe_search` implementa Wolfe simplificado para MINIMIZACIÓN.
+    """
+    a = float(a)
+    b = float(b)
+    x0 = (a + b) / 2.0
+
+    out = wolfe_search(
+        func,
+        x0,
+        alpha0=alpha0,
+        rho=rho,
+        c1=c1,
+        c2=c2,
+        max_iter=max_iter,
+        return_history=True
+    )
+
+    # out: (x_new, f_new, iteraciones, distancia, history)
+    x_new, f_new, iters, distancia, history = out
+
+    if return_history:
+        return history
+    return (x_new, f_new, iters, distancia)
