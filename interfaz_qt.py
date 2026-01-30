@@ -562,11 +562,11 @@ class InterfazOptimizacion(QMainWindow):
                 var_str = self._parse_md_vars(self.vars_input.text())
                 x0_md = self._parse_md_x0(self.x0_input.text())
 
-# Carga por ruta (evita problemas de package/__init__.py y no requiere pip)
-try:
-    _load_md_wrappers_by_path()
-except Exception:
-    pass
+                # Carga por ruta (evita problemas de package/__init__.py y no requiere pip)
+                try:
+                    _load_md_wrappers_by_path()
+                except Exception:
+                    pass
 
                 if metodo == "MD: Penalización (Newton)":
                     if md_penalty_newton is None:
