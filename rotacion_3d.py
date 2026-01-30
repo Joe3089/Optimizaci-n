@@ -34,7 +34,7 @@ class Rotating3DCanvas(FigureCanvas):
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def set_data(self, iters, xs, zs, row_indices=None):
+    def set_data(self, iters, xs, zs, row_indices=None, labels=None):
         self._iters = list(iters)
         self._xs = list(xs)
         self._zs = list(zs)
@@ -43,9 +43,16 @@ class Rotating3DCanvas(FigureCanvas):
         self.ax.plot(self._iters, self._xs, self._zs, linewidth=2)
         self._pts = self.ax.scatter(self._iters, self._xs, self._zs, s=32)
         self._sel = self.ax.scatter([], [], [], s=90)
-        self.ax.set_xlabel("Iteración")
-        self.ax.set_ylabel("x")
-        self.ax.set_zlabel("f(x)")
+        
+        if labels and len(labels) == 3:
+            self.ax.set_xlabel(labels[0])
+            self.ax.set_ylabel(labels[1])
+            self.ax.set_zlabel(labels[2])
+        else:
+            self.ax.set_xlabel("Iteración")
+            self.ax.set_ylabel("x")
+            self.ax.set_zlabel("f(x)")
+            
         self.ax.set_title(self._title)
         self.draw_idle()
 

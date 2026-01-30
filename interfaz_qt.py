@@ -33,42 +33,50 @@ except Exception:  # pragma: no cover
     metodo_wolfe = None
     wolfe_search = None
 
-# --- Métodos Multidimensionales (sin pip: carga por ruta) ---
+# --- Métodos Multidimensionales (carga dinámica desde multi-dimensionals) ---
 md_penalty_newton = None
 md_barrier_newton = None
 md_penalty_bfgs = None
+md_weighted_sum_bfgs = None
 md_penalty_nelder = None
+md_weighted_sum_nelder = None
+md_weighted_sum_newton = None
 _mdw = None
 
 def _load_md_wrappers_by_path():
-    """Carga metodos_multidimensional/wrappers.py por ruta (sin depender de package imports)."""
-    global _mdw, md_penalty_newton, md_barrier_newton, md_penalty_bfgs, md_penalty_nelder
+    """Carga multi-dimensionals/wrappers.py y agrega la carpeta al path."""
+    global _mdw, md_penalty_newton, md_barrier_newton, md_penalty_bfgs, md_weighted_sum_bfgs, md_penalty_nelder, md_weighted_sum_nelder, md_weighted_sum_newton
     if _mdw is not None:
         return _mdw
 
-    import os
     import importlib.util
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    md_dir = os.path.join(base_dir, "metodos_multidimensional")
+    md_dir = os.path.join(base_dir, "multi-dimensionals")
     md_path = os.path.join(md_dir, "wrappers.py")
 
     if not os.path.exists(md_path):
         raise ImportError(f"No se encontró wrappers.py en: {md_path}")
 
-    spec = importlib.util.spec_from_file_location("md_wrappers_runtime", md_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"No se pudo crear spec para: {md_path}")
+    # Agregar al sys.path para que wrappers.py pueda importar line_search.py
+    if md_dir not in sys.path:
+        sys.path.insert(0, md_dir)
 
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    spec = importlib.util.spec_from_file_location("md_wrappers_pkg", md_path)
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod) # type: ignore
+        _mdw = mod
+        # Mapear funciones
+        md_penalty_newton = getattr(mod, "penalty_method_newton", None)
+        md_barrier_newton = getattr(mod, "barrier_method_newton", None)
+        md_penalty_bfgs = getattr(mod, "penalty_method_bfgs", None)
+        md_weighted_sum_bfgs = getattr(mod, "weighted_sum_bfgs", None)
+        md_penalty_nelder = getattr(mod, "penalty_method_nelder", None)
+        md_weighted_sum_nelder = getattr(mod, "weighted_sum_nelder", None)
+        md_weighted_sum_newton = getattr(mod, "weighted_sum_newton", None)
+    return _mdw
 
-    _mdw = mod
-    md_penalty_newton = getattr(mod, "penalty_method_newton", None)
-    md_barrier_newton = getattr(mod, "barrier_method_newton", None)
-    md_penalty_bfgs = getattr(mod, "penalty_method_bfgs", None)
-    md_penalty_nelder = getattr(mod, "penalty_method_nelder", None)
-    return mod
 try:
     from rotacion_3d import Rotating3DCanvas
 except Exception:  # pragma: no cover
@@ -175,34 +183,47 @@ class InterfazOptimizacion(QMainWindow):
         form.setVerticalSpacing(10)
 
         # Función
-        form.addWidget(QLabel("Función f(x):"), 0, 0)
+        self.lbl_func = QLabel("Función f(x):")
+        form.addWidget(self.lbl_func, 0, 0)
         self.func_input = QLineEdit()
         self.func_input.setPlaceholderText("Ej: -(x-3)**2 + 10")
         form.addWidget(self.func_input, 0, 1)
 
         # --- Campos para Métodos Multidimensionales (MD) ---
-        form.addWidget(QLabel("Restricción g(x):"), 0, 2)
+        self.lbl_constraint = QLabel("Restricción g(x):")
+        form.addWidget(self.lbl_constraint, 0, 2)
         self.constraint_input = QLineEdit()
         self.constraint_input.setPlaceholderText("Ej: x1**2 + x2**2 - 1")
-        self.constraint_input.setFixedWidth(90)
+        self.constraint_input.setFixedWidth(120)
         form.addWidget(self.constraint_input, 0, 3)
 
-        form.addWidget(QLabel("Variables:"), 1, 2)
+        self.lbl_vars = QLabel("Variables:")
+        form.addWidget(self.lbl_vars, 1, 2)
         self.vars_input = QLineEdit()
         self.vars_input.setPlaceholderText("Ej: x1 x2")
-        self.vars_input.setFixedWidth(90)
+        self.vars_input.setFixedWidth(120)
         form.addWidget(self.vars_input, 1, 3)
 
-        form.addWidget(QLabel("x0 (coma):"), 2, 2)
+        self.lbl_x0 = QLabel("x0 (coma):")
+        form.addWidget(self.lbl_x0, 2, 2)
         self.x0_input = QLineEdit()
-        self.x0_input.setPlaceholderText("Ej: 0.5,0.5")
-        self.x0_input.setFixedWidth(90)
+        self.x0_input.setPlaceholderText("Ej: 0.5, 0.5")
+        self.x0_input.setFixedWidth(120)
         form.addWidget(self.x0_input, 2, 3)
 
-        # ocultos hasta seleccionar un método MD
-        self.constraint_input.setVisible(False)
-        self.vars_input.setVisible(False)
-        self.x0_input.setVisible(False)
+        # Peso (w) para Suma Ponderada
+        self.lbl_weight = QLabel("Peso (w):")
+        form.addWidget(self.lbl_weight, 3, 2)
+        self.weight_spin = QDoubleSpinBox()
+        self.weight_spin.setRange(0.0, 1.0)
+        self.weight_spin.setSingleStep(0.1)
+        self.weight_spin.setValue(0.5)
+        form.addWidget(self.weight_spin, 3, 3)
+
+        # Ocultos por defecto
+        for w in [self.lbl_constraint, self.constraint_input, self.lbl_vars, self.vars_input,
+                  self.lbl_x0, self.x0_input, self.lbl_weight, self.weight_spin]:
+            w.setVisible(False)
 
         # Método
         form.addWidget(QLabel("Método:"), 1, 0)
@@ -212,7 +233,10 @@ class InterfazOptimizacion(QMainWindow):
             "MD: Penalización (Newton)",
             "MD: Barrera (Newton)",
             "MD: Penalización (BFGS)",
-            "MD: Penalización (Nelder-Mead)"
+            "MD: Penalización (Nelder-Mead)",
+            "MD: Suma Ponderada (Newton)",
+            "MD: Suma Ponderada (BFGS)",
+            "MD: Suma Ponderada (Nelder-Mead)"
         ])
         self.metodo_menu.currentIndexChanged.connect(self.on_metodo_change)
         form.addWidget(self.metodo_menu, 1, 1)
@@ -475,13 +499,25 @@ class InterfazOptimizacion(QMainWindow):
         metodo = self.metodo_menu.currentText()
         is_fibo = (metodo == "Fibonacci")
         is_md = metodo.startswith("MD:")
+        is_weighted = "Suma Ponderada" in metodo
+
         self.tol_label.setVisible(is_fibo)
         self.tol_spin.setVisible(is_fibo)
 
-        if hasattr(self, "constraint_input"):
-            self.constraint_input.setVisible(is_md)
-            self.vars_input.setVisible(is_md)
-            self.x0_input.setVisible(is_md)
+        # Visibilidad MD
+        self.lbl_constraint.setVisible(is_md)
+        self.constraint_input.setVisible(is_md)
+        self.lbl_vars.setVisible(is_md)
+        self.vars_input.setVisible(is_md)
+        self.lbl_x0.setVisible(is_md)
+        self.x0_input.setVisible(is_md)
+        
+        self.lbl_weight.setVisible(is_weighted)
+        self.weight_spin.setVisible(is_weighted)
+
+        # Etiquetas dinámicas
+        self.lbl_func.setText("Función f1(x):" if is_weighted else "Función f(x):")
+        self.lbl_constraint.setText("Función f2(x):" if is_weighted else "Restricción g(x):")
 
         self.min_spin.setEnabled(not is_md)
         self.max_spin.setEnabled(not is_md)
@@ -527,18 +563,14 @@ class InterfazOptimizacion(QMainWindow):
             raise ValueError("Para métodos MD, debe ingresar las variables (ej: x1 x2).")
         return s
 
-    def _md_diag(self) -> str:
-        try:
-            mod = _load_md_wrappers_by_path()
-            return f"wrappers: {getattr(mod, '__file__', 'desconocido')}"
-        except Exception as e:
-            return "wrappers: NO CARGADO (revisa metodos_multidimensional/wrappers.py)\n" + f"detalle: {e}"
-
     def _parse_md_constraint(self, s: str) -> str:
         s = (s or "").strip()
         if not s:
-            raise ValueError("Para métodos MD, debe ingresar la restricción g(x)<=0.")
+            raise ValueError("Debe ingresar la restricción g(x) o función f2(x).")
         return s
+
+    def _md_diag(self) -> str:
+        return "Verifique que 'multi-dimensionals/wrappers.py' exista y tenga las dependencias (sympy, scipy)."
 
     def _auto_params(self, a: float, b: float) -> Dict[str, float]:
         if a == b:
@@ -556,56 +588,64 @@ class InterfazOptimizacion(QMainWindow):
             expr = self.func_input.text().strip()
             metodo = self.metodo_menu.currentText()
 
+            # --- Ejecución de Métodos Multidimensionales ---
             if metodo.startswith("MD:"):
                 func_str = expr
                 constraint_str = self._parse_md_constraint(self.constraint_input.text())
                 var_str = self._parse_md_vars(self.vars_input.text())
                 x0_md = self._parse_md_x0(self.x0_input.text())
+                weight_val = self.weight_spin.value()
 
-                # Carga por ruta (evita problemas de package/__init__.py y no requiere pip)
                 try:
                     _load_md_wrappers_by_path()
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise ImportError(f"Error cargando wrappers MD: {e}")
 
+                out = None
                 if metodo == "MD: Penalización (Newton)":
-                    if md_penalty_newton is None:
-                        raise ImportError("No se pudo importar penalty_method_newton\n" + self._md_diag())
-                    out = md_penalty_newton(func_str, constraint_str, var_str, x0_md)
+                    if md_penalty_newton:
+                        out = md_penalty_newton(func_str, constraint_str, var_str, x0_md)
                 elif metodo == "MD: Barrera (Newton)":
-                    if md_barrier_newton is None:
-                        raise ImportError("No se pudo importar barrier_method_newton\n" + self._md_diag())
-                    out = md_barrier_newton(func_str, constraint_str, var_str, x0_md)
+                    if md_barrier_newton:
+                        out = md_barrier_newton(func_str, constraint_str, var_str, x0_md)
                 elif metodo == "MD: Penalización (BFGS)":
-                    if md_penalty_bfgs is None:
-                        raise ImportError("No se pudo importar penalty_method_bfgs\n" + self._md_diag())
-                    out = md_penalty_bfgs(func_str, constraint_str, var_str, x0_md)
+                    if md_penalty_bfgs:
+                        out = md_penalty_bfgs(func_str, constraint_str, var_str, x0_md)
                 elif metodo == "MD: Penalización (Nelder-Mead)":
-                    if md_penalty_nelder is None:
-                        raise ImportError("No se pudo importar penalty_method_nelder\n" + self._md_diag())
-                    out = md_penalty_nelder(func_str, constraint_str, var_str, x0_md)
-                else:
-                    raise ValueError("Método no soportado.")
+                    if md_penalty_nelder:
+                        out = md_penalty_nelder(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Suma Ponderada (Newton)":
+                    if md_weighted_sum_newton:
+                        out = md_weighted_sum_newton(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                elif metodo == "MD: Suma Ponderada (BFGS)":
+                    if md_weighted_sum_bfgs:
+                        out = md_weighted_sum_bfgs(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                elif metodo == "MD: Suma Ponderada (Nelder-Mead)":
+                    if md_weighted_sum_nelder:
+                        out = md_weighted_sum_nelder(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                
+                if out is None:
+                    raise ImportError(f"El método '{metodo}' no se cargó correctamente.\n" + self._md_diag())
 
-                history = []
-                if isinstance(out, (tuple, list)) and len(out) >= 3 and isinstance(out[2], list):
-                    history = out[2]
+                # Procesar salida MD (x_opt, f_opt, log_data)
+                parsed = self._parse_method_output(metodo, out)
+                resumen = parsed["resumen"]
+                history = parsed["history"]
+
                 self._current_expr = expr
-                self._update_table(self._coerce_history(history))
-                try:
-                    self.status_lbl.setText(f"✓ {metodo} → x*={out[0]}, f(x*)={out[1]}")
-                except Exception:
-                    self.status_lbl.setText(f"✓ {metodo} ejecutado.")
+                self._update_table(history)
+                
+                # Mostrar resultado en status
+                if "x_opt" in resumen:
+                    self.status_lbl.setText(f"✓ {metodo} → x*={resumen['x_opt']}, f*={resumen.get('f_opt','?')}")
+                else:
+                    self.status_lbl.setText(f"✓ {metodo} finalizado.")
 
-                # MD: no graficar en 1D
-                if self._canvas is not None:
-                    self.plot_layout.removeWidget(self._canvas)
-                    self._canvas.setParent(None)
-                    self._canvas = None
-                self.plot_placeholder.setText("Método multidimensional: gráfico 1D no aplica.")
-                self.plot_placeholder.show()
+                # Graficar MD (pasamos f=None porque ya tenemos los valores en history)
+                self._render_plot(metodo, None, history)
                 return
 
+            # --- Ejecución de Métodos 1D ---
             f = self._parse_function(expr)
 
             a_in = float(self.min_spin.value())
@@ -701,32 +741,66 @@ class InterfazOptimizacion(QMainWindow):
 
         self.table.resizeColumnsToContents()
 
-    def _history_to_xyz(self, f: Callable[[float], float], history: List[Dict[str, Any]]):
-        iters, xs, zs = [], [], []
+    def _history_to_xyz(self, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]):
+        """
+        Convierte el historial en coordenadas para graficar.
+        - 1D: (Iteración, x, f(x))
+        - MD (2+ vars): (x1, x2, f(x))
+        """
+        axis1, axis2, axis3 = [], [], []
+        labels = ["Iteración", "x", "f(x)"]
+        is_md_plot = False
+
         for i, row in enumerate(history, start=1):
             it = row.get("iter", i)
             x = row.get("x", None)
+            
+            # Intentar obtener f(x) del historial
+            z = row.get("f(x)", row.get("fx", row.get("f", None)))
+            
+            # Lógica para extraer coordenadas
             if x is None:
+                # Casos especiales 1D (Fibonacci usa x1, x2, a, b)
                 if "x1" in row and "x2" in row:
                     x = (row["x1"] + row["x2"]) / 2.0
                 elif "a" in row and "b" in row:
                     x = (row["a"] + row["b"]) / 2.0
+            
             if x is None:
                 continue
-            try:
-                z = row.get("f(x)", row.get("fx", None))
-                if z is None:
-                    z = float(f(float(x)))
-            except Exception:
-                z = np.nan
-            iters.append(float(it))
-            xs.append(float(x))
-            zs.append(float(z))
-        return np.array(iters), np.array(xs), np.array(zs)
 
-    def _render_plot(self, metodo: str, f: Callable[[float], float], history: List[Dict[str, Any]]):
-        iters, xs, zs = self._history_to_xyz(f, history)
-        if iters.size == 0:
+            # Si x es una lista (Multidimensional)
+            if isinstance(x, list):
+                if len(x) >= 2:
+                    # Graficar x1 vs x2 vs f(x)
+                    is_md_plot = True
+                    val_x1 = float(x[0])
+                    val_x2 = float(x[1])
+                    val_z = float(z) if z is not None else 0.0
+                    axis1.append(val_x1)
+                    axis2.append(val_x2)
+                    axis3.append(val_z)
+                else:
+                    # MD pero solo 1 variable (raro, tratar como 1D)
+                    axis1.append(float(it))
+                    axis2.append(float(x[0]))
+                    axis3.append(float(z) if z is not None else 0.0)
+            else:
+                # Caso 1D estándar
+                if z is None and f is not None:
+                    z = float(f(float(x)))
+                axis1.append(float(it))
+                axis2.append(float(x))
+                axis3.append(float(z) if z is not None else 0.0)
+
+        if is_md_plot:
+            labels = ["x1", "x2", "f(x)"]
+            
+        return np.array(axis1), np.array(axis2), np.array(axis3), labels
+
+    def _render_plot(self, metodo: str, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]):
+        d1, d2, d3, labels = self._history_to_xyz(f, history)
+        if d1.size == 0:
             return
 
         self.plot_placeholder.hide()
@@ -741,10 +815,10 @@ class InterfazOptimizacion(QMainWindow):
         self._canvas = Rotating3DCanvas(self.plot_frame, title=titulo)
         self.plot_layout.addWidget(self._canvas)
 
-        self._canvas.set_data(iters, xs, zs)
+        self._canvas.set_data(d1, d2, d3, labels=labels)
         self._canvas.start_rotation()
 
-    def _save_plot_image(self, metodo: str, f: Callable[[float], float], history: List[Dict[str, Any]]) -> Optional[str]:
+    def _save_plot_image(self, metodo: str, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]) -> Optional[str]:
         # genera PNG 3D para Excel
         try:
             import matplotlib
@@ -752,18 +826,18 @@ class InterfazOptimizacion(QMainWindow):
             import matplotlib.pyplot as plt
             from mpl_toolkits.mplot3d import Axes3D  # noqa
 
-            iters, xs, zs = self._history_to_xyz(f, history)
-            if iters.size == 0:
+            d1, d2, d3, labels = self._history_to_xyz(f, history)
+            if d1.size == 0:
                 return None
 
             fig = plt.figure(figsize=(7.2, 4.8), dpi=150)
             ax = fig.add_subplot(111, projection="3d")
-            ax.plot(iters, xs, zs, linewidth=2)
-            ax.scatter([iters[-1]], [xs[-1]], [zs[-1]], s=35)
+            ax.plot(d1, d2, d3, linewidth=2)
+            ax.scatter([d1[-1]], [d2[-1]], [d3[-1]], s=35)
             ax.set_title(f"{metodo} - f(x)")
-            ax.set_xlabel("Iteración")
-            ax.set_ylabel("x")
-            ax.set_zlabel("f(x)")
+            ax.set_xlabel(labels[0])
+            ax.set_ylabel(labels[1])
+            ax.set_zlabel(labels[2])
             fig.tight_layout()
 
             fd, path = tempfile.mkstemp(prefix="plot_", suffix=".png")
@@ -889,6 +963,13 @@ class InterfazOptimizacion(QMainWindow):
                 history = out[4] if len(out) >= 5 else []
                 return {"resumen": resumen, "history": self._coerce_history(history)}
             return {"resumen": resumen, "history": []}
+
+        # MD Wrappers: (x_opt, f_opt, log_data)
+        if metodo.startswith("MD:"):
+            if isinstance(out, tuple) and len(out) == 3:
+                x_opt, f_opt, history = out
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": len(history)})
+                return {"resumen": resumen, "history": self._coerce_history(history)}
 
         return {"resumen": resumen, "history": []}
 
