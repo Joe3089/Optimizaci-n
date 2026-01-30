@@ -605,7 +605,7 @@ class InterfazOptimizacion(QMainWindow):
                 if metodo == "MD: Penalización (Newton)":
                     if md_penalty_newton:
                         out = md_penalty_newton(func_str, constraint_str, var_str, x0_md)
-                elif metodo == "MD: Barrera (Newton)":
+                if metodo == "MD: Barrera (Newton)":
                     if md_barrier_newton:
                         out = md_barrier_newton(func_str, constraint_str, var_str, x0_md)
                 elif metodo == "MD: Penalización (BFGS)":
@@ -752,11 +752,11 @@ class InterfazOptimizacion(QMainWindow):
         is_md_plot = False
 
         for i, row in enumerate(history, start=1):
-            it = row.get("iter", i)
-            x = row.get("x", None)
+            it = row.get("iter", row.get("k", i))
+            x = row.get("x", row.get("x_k", None))
             
             # Intentar obtener f(x) del historial
-            z = row.get("f(x)", row.get("fx", row.get("f", None)))
+            z = row.get("f(x)", row.get("fx", row.get("f", row.get("f_k", None))))
             
             # Lógica para extraer coordenadas
             if x is None:
@@ -770,12 +770,12 @@ class InterfazOptimizacion(QMainWindow):
                 continue
 
             # Si x es una lista (Multidimensional)
-            if isinstance(x, list):
+            if isinstance(x, (list, np.ndarray)):
                 if len(x) >= 2:
                     # Graficar x1 vs x2 vs f(x)
                     is_md_plot = True
-                    val_x1 = float(x[0])
-                    val_x2 = float(x[1])
+                    val_x1 = float(x[0]) if x[0] is not None else 0.0
+                    val_x2 = float(x[1]) if x[1] is not None else 0.0
                     val_z = float(z) if z is not None else 0.0
                     axis1.append(val_x1)
                     axis2.append(val_x2)
