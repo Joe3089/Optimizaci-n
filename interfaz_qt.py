@@ -33,6 +33,42 @@ except Exception:  # pragma: no cover
     metodo_wolfe = None
     wolfe_search = None
 
+# --- Métodos Multidimensionales (sin pip: carga por ruta) ---
+md_penalty_newton = None
+md_barrier_newton = None
+md_penalty_bfgs = None
+md_penalty_nelder = None
+_mdw = None
+
+def _load_md_wrappers_by_path():
+    """Carga metodos_multidimensional/wrappers.py por ruta (sin depender de package imports)."""
+    global _mdw, md_penalty_newton, md_barrier_newton, md_penalty_bfgs, md_penalty_nelder
+    if _mdw is not None:
+        return _mdw
+
+    import os
+    import importlib.util
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    md_dir = os.path.join(base_dir, "metodos_multidimensional")
+    md_path = os.path.join(md_dir, "wrappers.py")
+
+    if not os.path.exists(md_path):
+        raise ImportError(f"No se encontró wrappers.py en: {md_path}")
+
+    spec = importlib.util.spec_from_file_location("md_wrappers_runtime", md_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"No se pudo crear spec para: {md_path}")
+
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+
+    _mdw = mod
+    md_penalty_newton = getattr(mod, "penalty_method_newton", None)
+    md_barrier_newton = getattr(mod, "barrier_method_newton", None)
+    md_penalty_bfgs = getattr(mod, "penalty_method_bfgs", None)
+    md_penalty_nelder = getattr(mod, "penalty_method_nelder", None)
+    return mod
 try:
     from rotacion_3d import Rotating3DCanvas
 except Exception:  # pragma: no cover
@@ -144,10 +180,40 @@ class InterfazOptimizacion(QMainWindow):
         self.func_input.setPlaceholderText("Ej: -(x-3)**2 + 10")
         form.addWidget(self.func_input, 0, 1)
 
+        # --- Campos para Métodos Multidimensionales (MD) ---
+        form.addWidget(QLabel("Restricción g(x):"), 0, 2)
+        self.constraint_input = QLineEdit()
+        self.constraint_input.setPlaceholderText("Ej: x1**2 + x2**2 - 1")
+        self.constraint_input.setFixedWidth(90)
+        form.addWidget(self.constraint_input, 0, 3)
+
+        form.addWidget(QLabel("Variables:"), 1, 2)
+        self.vars_input = QLineEdit()
+        self.vars_input.setPlaceholderText("Ej: x1 x2")
+        self.vars_input.setFixedWidth(90)
+        form.addWidget(self.vars_input, 1, 3)
+
+        form.addWidget(QLabel("x0 (coma):"), 2, 2)
+        self.x0_input = QLineEdit()
+        self.x0_input.setPlaceholderText("Ej: 0.5,0.5")
+        self.x0_input.setFixedWidth(90)
+        form.addWidget(self.x0_input, 2, 3)
+
+        # ocultos hasta seleccionar un método MD
+        self.constraint_input.setVisible(False)
+        self.vars_input.setVisible(False)
+        self.x0_input.setVisible(False)
+
         # Método
         form.addWidget(QLabel("Método:"), 1, 0)
         self.metodo_menu = QComboBox()
-        self.metodo_menu.addItems(["Búsqueda Local", "Fibonacci", "Armijo", "Wolfe"])
+        self.metodo_menu.addItems([
+            "Búsqueda Local", "Fibonacci", "Armijo", "Wolfe",
+            "MD: Penalización (Newton)",
+            "MD: Barrera (Newton)",
+            "MD: Penalización (BFGS)",
+            "MD: Penalización (Nelder-Mead)"
+        ])
         self.metodo_menu.currentIndexChanged.connect(self.on_metodo_change)
         form.addWidget(self.metodo_menu, 1, 1)
 
@@ -408,8 +474,17 @@ class InterfazOptimizacion(QMainWindow):
     def on_metodo_change(self):
         metodo = self.metodo_menu.currentText()
         is_fibo = (metodo == "Fibonacci")
+        is_md = metodo.startswith("MD:")
         self.tol_label.setVisible(is_fibo)
         self.tol_spin.setVisible(is_fibo)
+
+        if hasattr(self, "constraint_input"):
+            self.constraint_input.setVisible(is_md)
+            self.vars_input.setVisible(is_md)
+            self.x0_input.setVisible(is_md)
+
+        self.min_spin.setEnabled(not is_md)
+        self.max_spin.setEnabled(not is_md)
 
     def limpiar(self):
         self.status_lbl.setText("")
@@ -437,6 +512,34 @@ class InterfazOptimizacion(QMainWindow):
         _ = f(0.0)
         return f
 
+    def _parse_md_x0(self, s: str) -> List[float]:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Para métodos MD, debe ingresar x0 (ej: 0.5, 0.5).")
+        try:
+            return [float(x.strip()) for x in s.split(",") if x.strip()]
+        except Exception:
+            raise ValueError("x0 inválido. Use valores separados por coma. Ej: 0.5, 0.5")
+
+    def _parse_md_vars(self, s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Para métodos MD, debe ingresar las variables (ej: x1 x2).")
+        return s
+
+    def _md_diag(self) -> str:
+        try:
+            mod = _load_md_wrappers_by_path()
+            return f"wrappers: {getattr(mod, '__file__', 'desconocido')}"
+        except Exception as e:
+            return "wrappers: NO CARGADO (revisa metodos_multidimensional/wrappers.py)\n" + f"detalle: {e}"
+
+    def _parse_md_constraint(self, s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Para métodos MD, debe ingresar la restricción g(x)<=0.")
+        return s
+
     def _auto_params(self, a: float, b: float) -> Dict[str, float]:
         if a == b:
             b = a + 1.0
@@ -451,6 +554,58 @@ class InterfazOptimizacion(QMainWindow):
     def ejecutar_metodo(self):
         try:
             expr = self.func_input.text().strip()
+            metodo = self.metodo_menu.currentText()
+
+            if metodo.startswith("MD:"):
+                func_str = expr
+                constraint_str = self._parse_md_constraint(self.constraint_input.text())
+                var_str = self._parse_md_vars(self.vars_input.text())
+                x0_md = self._parse_md_x0(self.x0_input.text())
+
+# Carga por ruta (evita problemas de package/__init__.py y no requiere pip)
+try:
+    _load_md_wrappers_by_path()
+except Exception:
+    pass
+
+                if metodo == "MD: Penalización (Newton)":
+                    if md_penalty_newton is None:
+                        raise ImportError("No se pudo importar penalty_method_newton\n" + self._md_diag())
+                    out = md_penalty_newton(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Barrera (Newton)":
+                    if md_barrier_newton is None:
+                        raise ImportError("No se pudo importar barrier_method_newton\n" + self._md_diag())
+                    out = md_barrier_newton(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Penalización (BFGS)":
+                    if md_penalty_bfgs is None:
+                        raise ImportError("No se pudo importar penalty_method_bfgs\n" + self._md_diag())
+                    out = md_penalty_bfgs(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Penalización (Nelder-Mead)":
+                    if md_penalty_nelder is None:
+                        raise ImportError("No se pudo importar penalty_method_nelder\n" + self._md_diag())
+                    out = md_penalty_nelder(func_str, constraint_str, var_str, x0_md)
+                else:
+                    raise ValueError("Método no soportado.")
+
+                history = []
+                if isinstance(out, (tuple, list)) and len(out) >= 3 and isinstance(out[2], list):
+                    history = out[2]
+                self._current_expr = expr
+                self._update_table(self._coerce_history(history))
+                try:
+                    self.status_lbl.setText(f"✓ {metodo} → x*={out[0]}, f(x*)={out[1]}")
+                except Exception:
+                    self.status_lbl.setText(f"✓ {metodo} ejecutado.")
+
+                # MD: no graficar en 1D
+                if self._canvas is not None:
+                    self.plot_layout.removeWidget(self._canvas)
+                    self._canvas.setParent(None)
+                    self._canvas = None
+                self.plot_placeholder.setText("Método multidimensional: gráfico 1D no aplica.")
+                self.plot_placeholder.show()
+                return
+
             f = self._parse_function(expr)
 
             a_in = float(self.min_spin.value())
