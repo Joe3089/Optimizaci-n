@@ -37,7 +37,6 @@ def newton_armijo(
     # --- 2. Conversión a Funciones Numéricas ---
     # Definir módulos para manejar DiracDelta (que surge de derivar Max) y Heaviside
     modules = [{'DiracDelta': lambda x: 0.0, 'Heaviside': lambda x: np.heaviside(x, 1.0)}, 'numpy']
-
     f_num = sympy.lambdify(vars_sym, f_sym, modules)
     grad_num = sympy.lambdify(vars_sym, grad_sym, modules)
     hess_num = sympy.lambdify(vars_sym, hess_sym, modules)
@@ -165,7 +164,6 @@ def wolfe_line_search(
         return None, []
 
     grad_sym = [f_sym.diff(var) for var in vars_sym]
-    
     modules = [{'DiracDelta': lambda x: 0.0, 'Heaviside': lambda x: np.heaviside(x, 1.0)}, 'numpy']
     grad_num = sympy.lambdify(vars_sym, grad_sym, modules)
 

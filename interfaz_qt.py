@@ -774,8 +774,8 @@ class InterfazOptimizacion(QMainWindow):
                 if len(x) >= 2:
                     # Graficar x1 vs x2 vs f(x)
                     is_md_plot = True
-                    val_x1 = float(x[0])
-                    val_x2 = float(x[1])
+                    val_x1 = float(x[0]) if x[0] is not None else 0.0
+                    val_x2 = float(x[1]) if x[1] is not None else 0.0
                     val_z = float(z) if z is not None else 0.0
                     axis1.append(val_x1)
                     axis2.append(val_x2)

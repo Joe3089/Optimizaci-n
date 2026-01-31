@@ -35,9 +35,11 @@ def newton_armijo(
     hess_sym = [[f_sym.diff(v1, v2) for v2 in vars_sym] for v1 in vars_sym]
 
     # --- 2. Conversión a Funciones Numéricas ---
-    f_num = sympy.lambdify(vars_sym, f_sym, 'numpy')
-    grad_num = sympy.lambdify(vars_sym, grad_sym, 'numpy')
-    hess_num = sympy.lambdify(vars_sym, hess_sym, 'numpy')
+    # Definir módulos para manejar DiracDelta (que surge de derivar Max) y Heaviside
+    modules = [{'DiracDelta': lambda *args: 0.0, 'Heaviside': lambda *args: np.heaviside(args[0], 1.0)}, 'numpy']
+    f_num = sympy.lambdify(vars_sym, f_sym, modules)
+    grad_num = sympy.lambdify(vars_sym, grad_sym, modules)
+    hess_num = sympy.lambdify(vars_sym, hess_sym, modules)
 
     # --- 3. Bucle de Optimización ---
     log_data = []
@@ -162,7 +164,8 @@ def wolfe_line_search(
         return None, []
 
     grad_sym = [f_sym.diff(var) for var in vars_sym]
-    grad_num = sympy.lambdify(vars_sym, grad_sym, 'numpy')
+    modules = [{'DiracDelta': lambda *args: 0.0, 'Heaviside': lambda *args: np.heaviside(args[0], 1.0)}, 'numpy']
+    grad_num = sympy.lambdify(vars_sym, grad_sym, modules)
 
     # --- 2. Valores Iniciales ---
     x_k = np.array(x_k_list, dtype=float)
@@ -279,8 +282,9 @@ def newton_wolfe_step(
     grad_sym = [f_sym.diff(var) for var in vars_sym]
     hess_sym = [[f_sym.diff(v1, v2) for v2 in vars_sym] for v1 in vars_sym]
     
-    grad_num = sympy.lambdify(vars_sym, grad_sym, 'numpy')
-    hess_num = sympy.lambdify(vars_sym, hess_sym, 'numpy')
+    modules = [{'DiracDelta': lambda *args: 0.0, 'Heaviside': lambda *args: np.heaviside(args[0], 1.0)}, 'numpy']
+    grad_num = sympy.lambdify(vars_sym, grad_sym, modules)
+    hess_num = sympy.lambdify(vars_sym, hess_sym, modules)
 
     # --- 2. Calcular d_k dinámicamente ---
     x_k = np.array(x_k_list, dtype=float)
