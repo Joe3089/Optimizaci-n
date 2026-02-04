@@ -2,6 +2,16 @@
 import os, sys, traceback, importlib
 
 # Asegura que la carpeta del archivo (interfaz_qt.py) esté en sys.path
+try:
+    from rotacion_3d import Rotating3DCanvas
+except Exception:  # pragma: no cover
+    Rotating3DCanvas = None
+
+try:
+    from canvas_2d import Function2DCanvas
+except Exception:  # pragma: no cover
+    Function2DCanvas = None
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
