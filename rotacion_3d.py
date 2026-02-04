@@ -1,12 +1,17 @@
 from PyQt5.QtCore import QTimer, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d import proj3d
-
+import numpy as np
 
 class Rotating3DCanvas(FigureCanvas):
+    """Canvas 3D giratorio.
+    - set_surface_and_path(X,Y,Z, path_x, path_y, path_z): dibuja superficie + trayectoria
+    - set_path(d1,d2,d3, labels): dibuja solo trayectoria (compatibilidad)
+    """
+
     point_moved = pyqtSignal(int, float)
-    def __init__(self, parent=None, interval_ms=50, title="Gráfica 3D", **kwargs):
+
+    def __init__(self, parent=None, interval_ms=50, title="Gráfica 3D"):
         self.fig = Figure()
         super().__init__(self.fig)
         self.setParent(parent)
@@ -18,15 +23,6 @@ class Rotating3DCanvas(FigureCanvas):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(interval_ms)
-        self._connect_interaction()
-
-    def set_title(self, title: str):
-        self._title = title
-        try:
-            self.ax.set_title(self._title)
-            self.draw_idle()
-        except Exception:
-            pass
 
     def _tick(self):
         self._angle = (self._angle + 1) % 360
@@ -34,25 +30,13 @@ class Rotating3DCanvas(FigureCanvas):
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def set_data(self, iters, xs, zs, row_indices=None, labels=None):
-        self._iters = list(iters)
-        self._xs = list(xs)
-        self._zs = list(zs)
-        self._row_indices = list(row_indices) if row_indices is not None else list(range(len(self._xs)))
+    def set_title(self, title: str):
+        self._title = title
+        self.ax.set_title(self._title)
+        self.draw_idle()
+
+    def clear(self):
         self.ax.cla()
-        self.ax.plot(self._iters, self._xs, self._zs, linewidth=2)
-        self._pts = self.ax.scatter(self._iters, self._xs, self._zs, s=32)
-        self._sel = self.ax.scatter([], [], [], s=90)
-        
-        if labels and len(labels) == 3:
-            self.ax.set_xlabel(labels[0])
-            self.ax.set_ylabel(labels[1])
-            self.ax.set_zlabel(labels[2])
-        else:
-            self.ax.set_xlabel("Iteración")
-            self.ax.set_ylabel("x")
-            self.ax.set_zlabel("f(x)")
-            
         self.ax.set_title(self._title)
         self.draw_idle()
 
@@ -64,84 +48,43 @@ class Rotating3DCanvas(FigureCanvas):
         if self._timer.isActive():
             self._timer.stop()
 
+    def set_surface_and_path(self, X, Y, Z, path_x=None, path_y=None, path_z=None,
+                             labels=("x1","x2","f(x)"),
+                             surface_alpha=0.55):
+        self.ax.cla()
 
-
-    def _nearest_point(self, event):
-        # Devuelve índice del punto más cercano en coordenadas de pantalla (pixeles)
-        if not self._iters:
-            return None
-        xs2d, ys2d = [], []
-        for itv, xv, zv in zip(self._iters, self._xs, self._zs):
-            x2, y2, _ = proj3d.proj_transform(itv, xv, zv, self.ax.get_proj())
-            xd, yd = self.ax.transData.transform((x2, y2))
-            xs2d.append(xd); ys2d.append(yd)
-        ex, ey = event.x, event.y
-        best_i, best_d = None, None
-        for i, (xd, yd) in enumerate(zip(xs2d, ys2d)):
-            d = (xd - ex) ** 2 + (yd - ey) ** 2
-            if best_d is None or d < best_d:
-                best_d, best_i = d, i
-        if best_d is not None and best_d <= (18 ** 2):
-            return best_i
-        return None
-
-    def _set_selected(self, idx):
-        if idx is None or idx < 0 or idx >= len(self._iters):
-            self._sel._offsets3d = ([], [], [])
-            self.draw_idle()
-            return
-        self._sel._offsets3d = ([self._iters[idx]], [self._xs[idx]], [self._zs[idx]])
-        self.draw_idle()
-
-    def _connect_interaction(self):
-        self._dragging = False
-        self._drag_idx = None
-        self._iters = []
-        self._xs = []
-        self._zs = []
-        self.mpl_connect("button_press_event", self._on_press)
-        self.mpl_connect("button_release_event", self._on_release)
-        self.mpl_connect("motion_notify_event", self._on_motion)
-
-    def _on_press(self, event):
-        if event.inaxes != self.ax:
-            return
-        idx = self._nearest_point(event)
-        if idx is None:
-            return
-        self._dragging = True
-        self._drag_idx = idx
-        self._set_selected(idx)
-        self.stop_rotation()
-
-    def _on_motion(self, event):
-        if not getattr(self, "_dragging", False):
-            return
-        if event.inaxes != self.ax:
-            return
-        if self._drag_idx is None:
-            return
-        if event.xdata is None or event.ydata is None:
-            return
-
-        # Actualiza x del punto seleccionado según el movimiento vertical del mouse (event.ydata)
-        i = self._drag_idx
-        new_x = float(event.ydata)
-        self._xs[i] = new_x
+        # Superficie (enmascara NaNs)
+        Zm = np.ma.masked_invalid(Z)
         try:
-            hid = int(self._row_indices[i])
-            self.point_moved.emit(hid, new_x)
+            self.ax.plot_surface(X, Y, Zm, rstride=1, cstride=1,
+                                 linewidth=0, antialiased=True, alpha=surface_alpha)
         except Exception:
             pass
-        self.set_data(self._iters, self._xs, self._zs, row_indices=self._row_indices)
-        self._set_selected(i)
 
-    def _on_release(self, event):
-        if not getattr(self, "_dragging", False):
-            return
-        self._dragging = False
-        self._drag_idx = None
-        self.start_rotation()
-    def clear(self):
+        # Trayectoria
+        if path_x is not None and len(path_x) > 0:
+            self.ax.plot(path_x, path_y, path_z, color="tab:orange", linewidth=2.5)
+            self.ax.scatter(path_x, path_y, path_z, color="tab:red", s=32)
+            self.ax.scatter([path_x[-1]], [path_y[-1]], [path_z[-1]], color="black", s=70)
+
+        self.ax.set_xlabel(labels[0])
+        self.ax.set_ylabel(labels[1])
+        self.ax.set_zlabel(labels[2])
+        self.ax.set_title(self._title)
+        self.draw_idle()
+
+    # Compatibilidad con tu interfaz original: trayectoria con set_data
+    def set_data(self, d1, d2, d3, labels=("x1","x2","f(x)")):
+        self.set_path(d1, d2, d3, labels=labels)
+
+    def set_path(self, d1, d2, d3, labels=("x1","x2","f(x)")):
         self.ax.cla()
+        if len(d1) > 0:
+            self.ax.plot(d1, d2, d3, color="tab:orange", linewidth=2.5)
+            self.ax.scatter(d1, d2, d3, color="tab:red", s=32)
+            self.ax.scatter([d1[-1]], [d2[-1]], [d3[-1]], color="black", s=70)
+        self.ax.set_xlabel(labels[0])
+        self.ax.set_ylabel(labels[1])
+        self.ax.set_zlabel(labels[2])
+        self.ax.set_title(self._title)
         self.draw_idle()
