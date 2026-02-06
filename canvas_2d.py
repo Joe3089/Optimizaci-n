@@ -4,13 +4,14 @@ import numpy as np
 
 
 class Function2DCanvas(FigureCanvas):
-    \"\"\"Canvas 2D:
-    - 1D: f(x) + trayectoria (x_k, f(x_k))
-    - 2D: contornos de f(x1,x2) + trayectoria (x1_k, x2_k)
-    - Interacción: click/drag para mover un punto (callback opcional)
-    \"\"\"
+   """
+Canvas 2D:
+- 1D: f(x) + trayectoria (x_k, f(x_k))
+- 2D: contornos de f(x1, x2) + trayectoria (x1_k, x2_k)
+- Interacción: click/drag para mover un punto (callback opcional)
+"""
 
-    def __init__(self, parent=None, title="Gráfica 2D"):
+def __init__(self, parent=None, title="Gráfica 2D"):
         self.fig = Figure()
         super().__init__(self.fig)
         self.setParent(parent)
@@ -24,19 +25,19 @@ class Function2DCanvas(FigureCanvas):
         self._style_axes()
         self._connect_events()
 
-    def _style_axes(self):
+def _style_axes(self):
         self.ax.set_title(self._title)
         self.ax.grid(True, alpha=0.35)
         for s in self.ax.spines.values():
             s.set_linewidth(2.0)
         self.fig.tight_layout()
 
-    def set_title(self, title: str):
+def set_title(self, title: str):
         self._title = title
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def clear(self, msg: str = None):
+def clear(self, msg: str = None):
         self.ax.cla()
         self._sel = None
         self.ax.set_title(self._title)
@@ -49,22 +50,22 @@ class Function2DCanvas(FigureCanvas):
         self.draw_idle()
 
     # ---------- Interacción ----------
-    def set_point_changed_callback(self, fn):
-        \"\"\"fn(x, y) será llamado al hacer click o arrastrar el punto.\"\"\"
-        self._on_point_changed = fn
+def set_point_changed_callback(self, fn):
+       """fn(x, y) será llamado al hacer click o arrastrar el punto."""
+       self._on_point_changed = fn
 
-    def _connect_events(self):
+def _connect_events(self):
         self.mpl_connect("button_press_event", self._on_press)
         self.mpl_connect("button_release_event", self._on_release)
         self.mpl_connect("motion_notify_event", self._on_motion)
 
-    def _ensure_sel(self, x, y):
+def _ensure_sel(self, x, y):
         if self._sel is None:
             self._sel = self.ax.scatter([x], [y], color="black", s=90, zorder=10)
         else:
             self._sel.set_offsets([[x, y]])
 
-    def _on_press(self, e):
+def _on_press(self, e):
         if e.inaxes != self.ax or e.xdata is None or e.ydata is None:
             return
         self._dragging = True
@@ -74,7 +75,7 @@ class Function2DCanvas(FigureCanvas):
         if callable(self._on_point_changed):
             self._on_point_changed(x, y)
 
-    def _on_motion(self, e):
+def _on_motion(self, e):
         if not self._dragging:
             return
         if e.inaxes != self.ax or e.xdata is None or e.ydata is None:
@@ -85,11 +86,11 @@ class Function2DCanvas(FigureCanvas):
         if callable(self._on_point_changed):
             self._on_point_changed(x, y)
 
-    def _on_release(self, e):
+def _on_release(self, e):
         self._dragging = False
 
     # ---------- Plots ----------
-    def plot_1d(self, x_curve, y_curve, x_path=None, y_path=None,
+def plot_1d(self, x_curve, y_curve, x_path=None, y_path=None,
                 func_color="tab:blue", path_color="tab:orange",
                 points_color="tab:red", last_color="black"):
         self.ax.cla()
@@ -105,7 +106,7 @@ class Function2DCanvas(FigureCanvas):
         self._style_axes()
         self.draw_idle()
 
-    def plot_contours(self, X, Y, Z, path_x=None, path_y=None, gZ=None,
+def plot_contours(self, X, Y, Z, path_x=None, path_y=None, gZ=None,
                       contour_levels=18, contour_color="0.25",
                       g0_color="black", g0_ls="--",
                       path_color="tab:orange", points_color="tab:red",
