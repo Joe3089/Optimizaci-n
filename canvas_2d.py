@@ -11,19 +11,19 @@ Canvas 2D:
 - Interacción: click/drag para mover un punto (callback opcional)
 """
 
-def __init__(self, parent=None, title="Gráfica 2D"):
-        self.fig = Figure()
-        super().__init__(self.fig)
-        self.setParent(parent)
-        self.ax = self.fig.add_subplot(111)
-        self._title = title
+def __init__(self, parent=None):
+        fig = Figure()
+        super().__init__(fig)      
+        if parent is not None:
+            self.setParent(parent) 
 
+        self.fig = fig
+        self.ax = self.fig.add_subplot(111)
+
+        self._title = "Gráfica 2D"
         self._sel = None
         self._dragging = False
         self._on_point_changed = None
-
-        self._style_axes()
-        self._connect_events()
 
 def _style_axes(self):
         self.ax.set_title(self._title)
