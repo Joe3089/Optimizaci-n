@@ -5,16 +5,19 @@ import numpy as np
 
 
 class Rotating3DCanvas(FigureCanvas):
-    \"\"\"Canvas 3D giratorio (API compatible).
-    Soporta:
-      - set_title(str)
-      - set_surface_and_path(X,Y,Z, path_x,path_y,path_z, labels=...)
-      - set_curve3d(x,y,z, labels=...)
-      - set_data(d1,d2,d3, labels=...)  (compat)
-      - start_rotation() / stop_rotation()
-    \"\"\"
+   """
+Canvas 3D giratorio (API compatible).
 
-    def __init__(self, parent=None, interval_ms=50, title="Gráfica 3D"):
+Soporta:
+- set_title(str)
+- set_surface_and_path(X,Y,Z, path_x,path_y,path_z, labels=...)
+- set_curves(x,y,z, labels=...)
+- set_data(d1,d2,d3, labels=...)
+- start_rotation() / stop_rotation()
+"""
+
+
+def __init__(self, parent=None, interval_ms=50, title="Gráfica 3D"):
         self.fig = Figure()
         super().__init__(self.fig)
         self.setParent(parent)
@@ -27,33 +30,33 @@ class Rotating3DCanvas(FigureCanvas):
         self._timer.setInterval(interval_ms)
         self._timer.start()
 
-    def _tick(self):
+def _tick(self):
         self._angle = (self._angle + 1) % 360
         self.ax.view_init(elev=30, azim=self._angle)
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def start_rotation(self):
+def start_rotation(self):
         if not self._timer.isActive():
             self._timer.start()
 
-    def stop_rotation(self):
+def stop_rotation(self):
         if self._timer.isActive():
             self._timer.stop()
 
-    def set_title(self, title: str):
+def set_title(self, title: str):
         self._title = title
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def clear(self, msg: str = None):
+def clear(self, msg: str = None):
         self.ax.cla()
         self.ax.set_title(self._title)
         if msg:
             self.ax.text2D(0.5, 0.5, msg, transform=self.ax.transAxes, ha="center", va="center")
         self.draw_idle()
 
-    def set_surface_and_path(self, X, Y, Z, path_x=None, path_y=None, path_z=None,
+def set_surface_and_path(self, X, Y, Z, path_x=None, path_y=None, path_z=None,
                              labels=("x1", "x2", "f(x)"), surface_alpha=0.55):
         self.ax.cla()
         Zm = np.ma.masked_invalid(Z)
@@ -74,7 +77,7 @@ class Rotating3DCanvas(FigureCanvas):
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def set_curve3d(self, x, y, z, labels=("k", "x", "f(x)")):
+def set_curve3d(self, x, y, z, labels=("k", "x", "f(x)")):
         self.ax.cla()
         if len(x) > 0:
             self.ax.plot(x, y, z, color="tab:orange", linewidth=2.5)
@@ -86,5 +89,5 @@ class Rotating3DCanvas(FigureCanvas):
         self.ax.set_title(self._title)
         self.draw_idle()
 
-    def set_data(self, d1, d2, d3, labels=("x1", "x2", "f(x)")):
+def set_data(self, d1, d2, d3, labels=("x1", "x2", "f(x)")):
         self.set_curve3d(d1, d2, d3, labels=labels)
