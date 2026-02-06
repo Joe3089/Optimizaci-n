@@ -206,7 +206,7 @@ class InterfazOptimizacion(QMainWindow):
         self.lbl2d = QLabel("Ejecute 'Calcular' para ver la gráfica 2D.")
         self.lbl2d.setObjectName("plotPlaceholder")
         self.lbl2d.setAlignment(Qt.AlignCenter)
-        self.canvas2d = Function2DCanvas(self.plot_frame) 
+        self.canvas2d = Function2DCanvas() 
         self.canvas2d.set_title("Gráfica 2D")
         self.canvas2d.setVisible(False)
         self.canvas2d.setFixedHeight(240)
