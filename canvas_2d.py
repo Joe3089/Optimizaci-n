@@ -1,140 +1,130 @@
+# canvas_2d.py
+from __future__ import annotations
+
+from typing import Callable, List, Optional, Sequence, Tuple
+
+import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-import numpy as np
 
 
 class Function2DCanvas(FigureCanvas):
-   """
-Canvas 2D:
-- 1D: f(x) + trayectoria (x_k, f(x_k))
-- 2D: contornos de f(x1, x2) + trayectoria (x1_k, x2_k)
-- Interacción: click/drag para mover un punto (callback opcional)
-"""
+    """
+    Canvas 2D (Matplotlib + Qt)
+    - Dibuja contornos de f(x1,x2) y la trayectoria de puntos (x1,x2)
+    - Puntos de trayectoria en color distinto de la línea
+    - Interacción: click/drag para mover un punto (callback opcional)
+    """
 
-def __init__(self, parent=None):
-        fig = Figure()
-        super().__init__(fig)      
+    def __init__(self, parent=None, title: str = "Gráfica 2D"):
+        self.fig = Figure()
+        super().__init__(self.fig)
         if parent is not None:
-            self.setParent(parent) 
+            self.setParent(parent)
 
-        self.fig = fig
         self.ax = self.fig.add_subplot(111)
-
-        self._title = "Gráfica 2D"
-        self._sel = None
-        self._dragging = False
-        self._on_point_changed = None
-
-def _style_axes(self):
-        self.ax.set_title(self._title)
-        self.ax.grid(True, alpha=0.35)
-        for s in self.ax.spines.values():
-            s.set_linewidth(2.0)
-        self.fig.tight_layout()
-
-def set_title(self, title: str):
         self._title = title
-        self.ax.set_title(self._title)
-        self.draw_idle()
 
-def clear(self, msg: str = None):
-        self.ax.cla()
-        self._sel = None
-        self.ax.set_title(self._title)
-        self.ax.grid(True, alpha=0.35)
-        for s in self.ax.spines.values():
-            s.set_linewidth(2.0)
-        if msg:
-            self.ax.text(0.5, 0.5, msg, ha="center", va="center", transform=self.ax.transAxes)
-        self.fig.tight_layout()
-        self.draw_idle()
+        # data
+        self._X = None
+        self._Y = None
+        self._Z = None
+        self._path_xy: List[Tuple[float, float]] = []
 
-    # ---------- Interacción ----------
-def set_point_changed_callback(self, fn):
-       """fn(x, y) será llamado al hacer click o arrastrar el punto."""
-       self._on_point_changed = fn
-
-def _connect_events(self):
-        self.mpl_connect("button_press_event", self._on_press)
-        self.mpl_connect("button_release_event", self._on_release)
-        self.mpl_connect("motion_notify_event", self._on_motion)
-
-def _ensure_sel(self, x, y):
-        if self._sel is None:
-            self._sel = self.ax.scatter([x], [y], color="black", s=90, zorder=10)
-        else:
-            self._sel.set_offsets([[x, y]])
-
-def _on_press(self, e):
-        if e.inaxes != self.ax or e.xdata is None or e.ydata is None:
-            return
-        self._dragging = True
-        x, y = float(e.xdata), float(e.ydata)
-        self._ensure_sel(x, y)
-        self.draw_idle()
-        if callable(self._on_point_changed):
-            self._on_point_changed(x, y)
-
-def _on_motion(self, e):
-        if not self._dragging:
-            return
-        if e.inaxes != self.ax or e.xdata is None or e.ydata is None:
-            return
-        x, y = float(e.xdata), float(e.ydata)
-        self._ensure_sel(x, y)
-        self.draw_idle()
-        if callable(self._on_point_changed):
-            self._on_point_changed(x, y)
-
-def _on_release(self, e):
+        # interaction
+        self._sel_idx: Optional[int] = None
         self._dragging = False
+        self._on_point_changed: Optional[Callable[[int, float, float], None]] = None
 
-    # ---------- Plots ----------
-def plot_1d(self, x_curve, y_curve, x_path=None, y_path=None,
-                func_color="tab:blue", path_color="tab:orange",
-                points_color="tab:red", last_color="black"):
-        self.ax.cla()
-        self._sel = None
-        self.ax.plot(x_curve, y_curve, color=func_color, linewidth=2.5, label="f(x)")
-        if x_path is not None and y_path is not None and len(x_path) > 0:
-            self.ax.plot(x_path, y_path, color=path_color, linewidth=2.5, label="Recorrido")
-            self.ax.scatter(x_path, y_path, color=points_color, s=45, label="Puntos")
-            self.ax.scatter([x_path[-1]], [y_path[-1]], color=last_color, s=90, zorder=6, label="Último")
-        self.ax.set_xlabel("x")
-        self.ax.set_ylabel("f(x)")
-        self.ax.legend(loc="best")
-        self._style_axes()
-        self.draw_idle()
+        self._cid_press = self.mpl_connect("button_press_event", self._on_press)
+        self._cid_release = self.mpl_connect("button_release_event", self._on_release)
+        self._cid_move = self.mpl_connect("motion_notify_event", self._on_move)
 
-def plot_contours(self, X, Y, Z, path_x=None, path_y=None, gZ=None,
-                      contour_levels=18, contour_color="0.25",
-                      g0_color="black", g0_ls="--",
-                      path_color="tab:orange", points_color="tab:red",
-                      last_color="black"):
-        self.ax.cla()
-        self._sel = None
+        self._redraw()
 
-        finite = np.isfinite(Z)
-        if np.any(finite):
-            zmin = np.nanmin(Z)
-            zmax = np.nanmax(Z)
-            if np.isfinite(zmin) and np.isfinite(zmax) and zmax > zmin:
-                levels = np.linspace(zmin, zmax, contour_levels)
-                self.ax.contour(X, Y, Z, levels=levels, colors=contour_color, linewidths=1.2)
+    def set_point_changed_callback(self, fn: Callable[[int, float, float], None]):
+        """fn(idx, x, y) será llamado al hacer click o arrastrar el punto."""
+        self._on_point_changed = fn
 
-        if gZ is not None:
+    def set_title(self, title: str):
+        self._title = title
+        try:
+            self.ax.set_title(self._title)
+            self.draw_idle()
+        except Exception:
+            pass
+
+    def clear(self):
+        self._X = self._Y = self._Z = None
+        self._path_xy = []
+        self._redraw()
+
+    def set_contour(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray):
+        self._X, self._Y, self._Z = X, Y, Z
+        self._redraw()
+
+    def set_path(self, path_xy: Sequence[Sequence[float]]):
+        self._path_xy = [(float(p[0]), float(p[1])) for p in path_xy] if path_xy else []
+        self._redraw()
+
+    def _redraw(self):
+        self.ax.clear()
+        self.ax.set_title(self._title)
+        self.ax.grid(True, alpha=0.3)
+
+        # Contours
+        if self._X is not None and self._Y is not None and self._Z is not None:
             try:
-                self.ax.contour(X, Y, gZ, levels=[0.0], colors=g0_color, linestyles=g0_ls, linewidths=2.0)
+                self.ax.contour(self._X, self._Y, self._Z, levels=20, linewidths=1.0)
             except Exception:
+                # fallback
                 pass
 
-        if path_x is not None and path_y is not None and len(path_x) > 0:
-            self.ax.plot(path_x, path_y, color=path_color, linewidth=2.5, label="Recorrido")
-            self.ax.scatter(path_x, path_y, color=points_color, s=45, label="Puntos")
-            self.ax.scatter([path_x[-1]], [path_y[-1]], color=last_color, s=90, zorder=6, label="Último")
+        # Path: line + points (different styles)
+        if self._path_xy:
+            xs = [p[0] for p in self._path_xy]
+            ys = [p[1] for p in self._path_xy]
+            self.ax.plot(xs, ys, linewidth=2.0)          # line
+            self.ax.scatter(xs, ys, s=35)                # points
 
-        self.ax.set_xlabel("x1")
-        self.ax.set_ylabel("x2")
-        self.ax.legend(loc="best")
-        self._style_axes()
+        self.fig.tight_layout()
         self.draw_idle()
+
+    # ---------------- interaction ----------------
+    def _nearest_point(self, x: float, y: float, tol_px: float = 12.0) -> Optional[int]:
+        if not self._path_xy:
+            return None
+        # transform data coords to display coords
+        pts = np.array(self._path_xy, dtype=float)
+        disp = self.ax.transData.transform(pts)
+        q = self.ax.transData.transform(np.array([[x, y]], dtype=float))[0]
+        d = np.sqrt(((disp - q) ** 2).sum(axis=1))
+        i = int(np.argmin(d))
+        return i if d[i] <= tol_px else None
+
+    def _on_press(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        idx = self._nearest_point(event.xdata, event.ydata)
+        if idx is None:
+            return
+        self._sel_idx = idx
+        self._dragging = True
+        if self._on_point_changed:
+            self._on_point_changed(idx, float(event.xdata), float(event.ydata))
+
+    def _on_release(self, event):
+        self._dragging = False
+        self._sel_idx = None
+
+    def _on_move(self, event):
+        if not self._dragging or self._sel_idx is None:
+            return
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        # update point
+        idx = self._sel_idx
+        self._path_xy[idx] = (float(event.xdata), float(event.ydata))
+        if self._on_point_changed:
+            self._on_point_changed(idx, float(event.xdata), float(event.ydata))
+        self._redraw()
