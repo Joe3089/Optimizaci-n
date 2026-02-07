@@ -19,10 +19,12 @@ class Function2DCanvas(FigureCanvas):
     def __init__(self, parent=None, title: str = "Gráfica 2D"):
         self.fig = Figure()
         super().__init__(self.fig)
+        self.setSizePolicy(self.sizePolicy().Expanding, self.sizePolicy().Expanding)
         if parent is not None:
             self.setParent(parent)
 
         self.ax = self.fig.add_subplot(111)
+        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.90, bottom=0.14)
         self._title = title
 
         # data

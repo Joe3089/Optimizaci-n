@@ -19,10 +19,12 @@ class Rotating3DCanvas(FigureCanvas):
     def __init__(self, parent=None, title: str = "Gráfica 3D"):
         self.fig = Figure()
         super().__init__(self.fig)
+        self.setSizePolicy(self.sizePolicy().Expanding, self.sizePolicy().Expanding)
         if parent is not None:
             self.setParent(parent)
 
         self.ax = self.fig.add_subplot(111, projection="3d")
+        self.fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.02)
         self._title = title
 
         self._X = self._Y = self._Z = None

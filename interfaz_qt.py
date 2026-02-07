@@ -1,617 +1,1169 @@
-# interfaz_qt.py
-from __future__ import annotations
-
+# -*- coding: utf-8 -*-
 import os
 import sys
 import math
+import tempfile
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Any, Optional
 
 import numpy as np
+import csv
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QDoubleSpinBox,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QSizePolicy,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
-
-# --------- Import canvases (must be in same folder as main.py) ----------
+# Métodos (con compatibilidad: algunos archivos definen wrappers metodo_* )
 try:
-    from canvas_2d import Function2DCanvas
-except Exception:
-    Function2DCanvas = None  # type: ignore
+    from busqueda_local import busqueda_local
+except Exception:  # pragma: no cover
+    busqueda_local = None
+
+try:
+    from fibonacci import metodo_fibonacci, fibonacci_search
+except Exception:  # pragma: no cover
+    metodo_fibonacci = None
+    fibonacci_search = None
+
+try:
+    from armijo import metodo_armijo, armijo_search
+except Exception:  # pragma: no cover
+    metodo_armijo = None
+    armijo_search = None
+
+try:
+    from wolfe import metodo_wolfe, wolfe_search
+except Exception:  # pragma: no cover
+    metodo_wolfe = None
+    wolfe_search = None
+
+# --- Métodos Multidimensionales (carga dinámica desde multi-dimensionals) ---
+md_penalty_newton = None
+md_barrier_newton = None
+md_penalty_bfgs = None
+md_weighted_sum_bfgs = None
+md_penalty_nelder = None
+md_weighted_sum_nelder = None
+md_weighted_sum_newton = None
+_mdw = None
+
+def _load_md_wrappers_by_path():
+    """Carga multi-dimensionals/wrappers.py y agrega la carpeta al path."""
+    global _mdw, md_penalty_newton, md_barrier_newton, md_penalty_bfgs, md_weighted_sum_bfgs, md_penalty_nelder, md_weighted_sum_nelder, md_weighted_sum_newton
+    if _mdw is not None:
+        return _mdw
+
+    import importlib.util
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    md_dir = os.path.join(base_dir, "multi-dimensionals")
+    md_path = os.path.join(md_dir, "wrappers.py")
+
+    if not os.path.exists(md_path):
+        raise ImportError(f"No se encontró wrappers.py en: {md_path}")
+
+    # Agregar al sys.path para que wrappers.py pueda importar line_search.py
+    if md_dir not in sys.path:
+        sys.path.insert(0, md_dir)
+
+    spec = importlib.util.spec_from_file_location("md_wrappers_pkg", md_path)
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod) # type: ignore
+        _mdw = mod
+        # Mapear funciones
+        md_penalty_newton = getattr(mod, "penalty_method_newton", None)
+        md_barrier_newton = getattr(mod, "barrier_method_newton", None)
+        md_penalty_bfgs = getattr(mod, "penalty_method_bfgs", None)
+        md_weighted_sum_bfgs = getattr(mod, "weighted_sum_bfgs", None)
+        md_penalty_nelder = getattr(mod, "penalty_method_nelder", None)
+        md_weighted_sum_nelder = getattr(mod, "weighted_sum_nelder", None)
+        md_weighted_sum_newton = getattr(mod, "weighted_sum_newton", None)
+    return _mdw
 
 try:
     from rotacion_3d import Rotating3DCanvas
-except Exception:
-    Rotating3DCanvas = None  # type: ignore
+except Exception:  # pragma: no cover
+    Rotating3DCanvas = None
 
-# --------- Ensure multi-dimensionals is importable ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MD_DIR = os.path.join(BASE_DIR, "multi-dimensionals")
-if os.path.isdir(MD_DIR) and MD_DIR not in sys.path:
-    sys.path.insert(0, MD_DIR)
-
-# 1D methods in root
 try:
-    import armijo as _armijo
-except Exception:
-    _armijo = None
-try:
-    import wolfe as _wolfe
-except Exception:
-    _wolfe = None
-try:
-    import fibonacci as _fibo
-except Exception:
-    _fibo = None
-try:
-    import busqueda_local as _blocal
-except Exception:
-    _blocal = None
-
-# MD methods in multi-dimensionals
-try:
-    import wrappers as _wrap
-except Exception:
-    _wrap = None
-try:
-    import line_search as _md_linesearch
-except Exception:
-    _md_linesearch = None
-try:
-    import localsearch as _md_localsearch
-except Exception:
-    _md_localsearch = None
-
-# sympy parsing (for plotting)
-import sympy as sp
+    from reporte_export import ReportItem, exportar_reporte_excel, exportar_reporte_pdf
+except Exception:  # pragma: no cover
+    ReportItem = None
+    exportar_reporte_excel = None
+    exportar_reporte_pdf = None
 
 
-@dataclass
-class MethodSpec:
-    key: str
-    label: str
-    kind: str  # '1d' or 'md'
-    needs_g: bool = False
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon, QPixmap, QColor, QBrush
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox, QLineEdit,
+    QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QMessageBox,
+    QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QSpacerItem, QMenu, QToolButton, QAction, QListView
+)
 
 
-METHODS: List[MethodSpec] = [
-    MethodSpec("armijo_1d", "Armijo (1D)", "1d"),
-    MethodSpec("wolfe_1d", "Wolfe (1D)", "1d"),
-    MethodSpec("fibonacci_1d", "Fibonacci (1D)", "1d"),
-    MethodSpec("busqueda_local_1d", "Búsqueda local (1D)", "1d"),
-
-    MethodSpec("penalty_newton", "MD: Penalización (Newton)", "md", needs_g=True),
-    MethodSpec("barrier_newton", "MD: Barrera (Newton)", "md", needs_g=True),
-
-    # wrappers extras (si existen en wrappers.py)
-    MethodSpec("penalty_bfgs", "MD: Penalización (BFGS)", "md", needs_g=True),
-    MethodSpec("weighted_sum_bfgs", "MD: Suma ponderada (BFGS)", "md", needs_g=True),
-    MethodSpec("penalty_nelder", "MD: Penalización (Nelder)", "md", needs_g=True),
-    MethodSpec("weighted_sum_nelder", "MD: Suma ponderada (Nelder)", "md", needs_g=True),
-    MethodSpec("weighted_sum_newton", "MD: Suma ponderada (Newton)", "md", needs_g=True),
-
-    # line_search module (si existe)
-    MethodSpec("md_newton_armijo", "MD: Newton + Armijo", "md", needs_g=False),
-    MethodSpec("md_newton_wolfe", "MD: Newton + Wolfe", "md", needs_g=False),
-    MethodSpec("md_wolfe_line_search", "MD: Wolfe line search", "md", needs_g=False),
-
-    # localsearch module (si existe)
-    MethodSpec("md_fibonacci_search", "MD: Fibonacci search", "md", needs_g=False),
-    MethodSpec("md_local_search", "MD: Local search", "md", needs_g=False),
-    MethodSpec("md_scipy_minimize", "MD: SciPy minimize", "md", needs_g=False),
-]
 
 
-def _safe_getattr(mod, name: str) -> Optional[Callable]:
-    if mod is None:
-        return None
-    return getattr(mod, name, None)
+SAFE_MATH = {
+    # constantes
+    "pi": math.pi,
+    "e": math.e,
+    # funciones básicas (numpy)
+    "sin": np.sin, "cos": np.cos, "tan": np.tan,
+    "arcsin": np.arcsin, "arccos": np.arccos, "arctan": np.arctan,
+    "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
+    "exp": np.exp, "log": np.log, "log10": np.log10, "sqrt": np.sqrt,
+    "abs": np.abs, "power": np.power
+}
 
 
-def _parse_vars(vars_text: str) -> List[str]:
-    txt = (vars_text or "").replace(",", " ").strip()
-    parts = [p for p in txt.split() if p]
-    return parts
-
-
-def _parse_x0(x0_text: str) -> List[float]:
-    txt = (x0_text or "").replace(";", ",").strip()
-    if not txt:
-        return []
-    parts = [p.strip() for p in txt.split(",")]
-    out = []
-    for p in parts:
-        if p:
-            out.append(float(p))
-    return out
-
-
-def _compile_sympy_func(expr_text: str, var_names: List[str]) -> Callable:
-    expr = sp.sympify(expr_text)
-    syms = [sp.Symbol(v) for v in var_names]
-    f = sp.lambdify(syms, expr, modules=["numpy"])
-    return f
-
-
-def _grid(minv: float, maxv: float, n: int = 80):
-    xs = np.linspace(minv, maxv, n)
-    ys = np.linspace(minv, maxv, n)
-    X, Y = np.meshgrid(xs, ys)
-    return X, Y
-
-
-def _history_to_path_xy(history: Any) -> List[Tuple[float, float]]:
+def resource_path(relative_path: str) -> str:
     """
-    Intenta extraer una trayectoria (x1,x2) desde varios formatos de history.
-    Soporta:
-      - list of dict con 'x_k' o 'x'
-      - list of list/tuple
-      - ndarray Nx2
+    Devuelve ruta absoluta para recursos (compatible con PyInstaller).
     """
-    if history is None:
-        return []
-    if isinstance(history, np.ndarray):
-        if history.ndim == 2 and history.shape[1] >= 2:
-            return [(float(r[0]), float(r[1])) for r in history]
-    if isinstance(history, list):
-        out = []
-        for h in history:
-            if isinstance(h, dict):
-                x = h.get("x_k", h.get("x", None))
-                if x is None:
-                    continue
-                if isinstance(x, (list, tuple, np.ndarray)) and len(x) >= 2:
-                    out.append((float(x[0]), float(x[1])))
-            elif isinstance(h, (list, tuple, np.ndarray)) and len(h) >= 2:
-                out.append((float(h[0]), float(h[1])))
-        return out
-    return []
+    try:
+        base_path = sys._MEIPASS  # type: ignore[attr-defined]
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 
 class InterfazOptimizacion(QMainWindow):
-    def __init__(self, resource_path=None):
+    """
+    UI principal: panel de control (izq) + dashboard (der).
+    - Mínimo/Máximo son los límites del intervalo [a,b]
+    - Parámetros internos (x0, paso, max_iter) se calculan automáticamente.
+    - Tolerancia SOLO para Fibonacci.
+    - Exportar Excel: un solo archivo por función, con pestañas por método ejecutado,
+      incluyendo tabla + imagen de la gráfica.
+    """
+
+    def __init__(self, resource_path_base: str = ".", resource_path: str = None):
         super().__init__()
-        self.setWindowTitle("Optimizador de Funciones")
-        self.resize(1200, 720)
+        # Compatibilidad con código que usa resource_path
+        if resource_path is not None:
+            resource_path_base = resource_path
 
-        # resource_path puede venir como función desde main.py
-        if callable(resource_path):
-            try:
-                resource_path = resource_path()
-            except Exception:
-                resource_path = None
-        self.resource_path = resource_path
+        
+        # estado: expr -> method -> data
+        self._results: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._current_expr: str = ""
 
+        self._canvas: Optional[Rotating3DCanvas] = None
         self._build_ui()
-        self._apply_style()
+        self._apply_styles()
+        self._apply_background()
+
+        self.on_metodo_change()  # set visibilities
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        root = QWidget()
-        self.setCentralWidget(root)
-        main = QHBoxLayout(root)
-        main.setContentsMargins(12, 12, 12, 12)
-        main.setSpacing(12)
+        self.setWindowTitle("Optimizador de Funciones")
+        ico = self._find_icon()
+        if ico:
+            self.setWindowIcon(QIcon(ico))
 
-        # LEFT: Panel de control
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(18)
+
+        # Left panel
         self.left_panel = QFrame()
-        self.left_panel.setObjectName("LeftPanel")
-        self.left_panel.setFixedWidth(360)
-        left = QVBoxLayout(self.left_panel)
-        left.setSpacing(10)
+        self.left_panel.setObjectName("leftPanel")
+        self.left_panel.setFixedWidth(480)
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setSpacing(12)
+        left_layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("Panel de control")
-        title.setObjectName("TitleLabel")
-        title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        left.addWidget(title)
+        title.setObjectName("panelTitle")
+        left_layout.addWidget(title)
 
-        self.method_combo = QComboBox()
-        self.method_combo.setObjectName("Combo")
-        for m in METHODS:
-            self.method_combo.addItem(m.label, m.key)
-        left.addWidget(QLabel("Método:"))
-        left.addWidget(self.method_combo)
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(10)
 
-        self.f_edit = QLineEdit()
-        self.f_edit.setPlaceholderText("Ej: (x1-4)**2 + (x2-4)**2")
-        left.addWidget(QLabel("Función f(x):"))
-        left.addWidget(self.f_edit)
 
-        self.g_edit = QLineEdit()
-        self.g_edit.setPlaceholderText("Ej: x1**2 + x2**2 - 1  (<= 0)")
-        left.addWidget(QLabel("Restricción g(x) (<=0):"))
-        left.addWidget(self.g_edit)
+        # Método (PRIMERO)
+        form.addWidget(QLabel("Método:"), 0, 0)
+        self.metodo_menu = QComboBox()
+        self.metodo_menu.addItems([
+            "Búsqueda Local", "Fibonacci", "Armijo", "Wolfe",
+            "MD: Penalización (Newton)",
+            "MD: Barrera (Newton)",
+            "MD: Penalización (BFGS)",
+            "MD: Penalización (Nelder-Mead)",
+            "MD: Suma Ponderada (Newton)",
+            "MD: Suma Ponderada (BFGS)",
+            "MD: Suma Ponderada (Nelder-Mead)"
+        ])
+        self.metodo_menu.setMaxVisibleItems(18)  # popup más legible
 
-        self.vars_edit = QLineEdit()
-        self.vars_edit.setPlaceholderText("Ej: x1 x2")
-        left.addWidget(QLabel("Variables:"))
-        left.addWidget(self.vars_edit)
+        # Hacer visible el nombre completo al seleccionar
+        self.metodo_menu.setEditable(True)
+        self.metodo_menu.lineEdit().setReadOnly(True)
+        self.metodo_menu.setInsertPolicy(QComboBox.NoInsert)
+        self.metodo_menu.setMinimumContentsLength(28)
+        self.metodo_menu.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
 
-        self.x0_edit = QLineEdit()
-        self.x0_edit.setPlaceholderText("Ej: 0.5, 0.5")
-        left.addWidget(QLabel("x0 (coma):"))
-        left.addWidget(self.x0_edit)
-
-        # min/max
-        mm = QHBoxLayout()
-        self.min_spin = QDoubleSpinBox()
-        self.min_spin.setDecimals(6)
-        self.min_spin.setRange(-1e9, 1e9)
-        self.min_spin.setValue(0.0)
-        self.max_spin = QDoubleSpinBox()
-        self.max_spin.setDecimals(6)
-        self.max_spin.setRange(-1e9, 1e9)
-        self.max_spin.setValue(5.0)
-        mm.addWidget(QLabel("mínimo:"))
-        mm.addWidget(self.min_spin)
-        mm.addSpacing(8)
-        mm.addWidget(QLabel("máximo:"))
-        mm.addWidget(self.max_spin)
-        left.addLayout(mm)
-
-        # Buttons
-        btnrow1 = QHBoxLayout()
-        self.btn_calc = QPushButton("Calcular")
-        self.btn_clear = QPushButton("Limpiar")
-        btnrow1.addWidget(self.btn_calc)
-        btnrow1.addWidget(self.btn_clear)
-        left.addLayout(btnrow1)
-
-        btnrow2 = QHBoxLayout()
-        self.btn_export = QPushButton("Exportar")
-        self.btn_exit = QPushButton("Salir")
-        btnrow2.addWidget(self.btn_export)
-        btnrow2.addWidget(self.btn_exit)
-        left.addLayout(btnrow2)
-
-        self.status = QLabel("")
-        self.status.setObjectName("StatusLabel")
-        self.status.setWordWrap(True)
-        left.addWidget(self.status)
-        left.addStretch(1)
-
-        main.addWidget(self.left_panel)
-
-        # RIGHT: Dashboard + plots
-        self.right_panel = QFrame()
-        self.right_panel.setObjectName("RightPanel")
-        right = QVBoxLayout(self.right_panel)
-        right.setSpacing(8)
-
-        dash_title = QLabel("Dashboard")
-        dash_title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        dash_title.setObjectName("TitleLabel")
-        right.addWidget(dash_title)
-
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["k", "x_k", "x_k_str", "f_k", "grad_norm", "alpha_k"])
-        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right.addWidget(self.table, stretch=3)
-
-        # Splitter for 2D / 3D
-        self.splitter = QSplitter(Qt.Vertical)
-        self.plot2d_frame = QFrame()
-        self.plot3d_frame = QFrame()
-        self.splitter.addWidget(self.plot2d_frame)
-        self.splitter.addWidget(self.plot3d_frame)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 2)
-        right.addWidget(self.splitter, stretch=4)
-
-        # 2D canvas
-        p2 = QVBoxLayout(self.plot2d_frame)
-        p2.setContentsMargins(0, 0, 0, 0)
-        if Function2DCanvas is None:
-            self.canvas2d = QLabel("No se pudo cargar el canvas 2D.")
-            p2.addWidget(self.canvas2d)
-        else:
-            self.canvas2d = Function2DCanvas(self.plot2d_frame, title="Gráfica 2D")
-            p2.addWidget(self.canvas2d)
-
-        # 3D canvas
-        p3 = QVBoxLayout(self.plot3d_frame)
-        p3.setContentsMargins(0, 0, 0, 0)
-        if Rotating3DCanvas is None:
-            self.canvas3d = QLabel("No se pudo cargar el canvas 3D.")
-            p3.addWidget(self.canvas3d)
-        else:
-            self.canvas3d = Rotating3DCanvas(self.plot3d_frame, title="Gráfica 3D")
-            p3.addWidget(self.canvas3d)
-            self.canvas3d.start_rotation(60)
-
-        main.addWidget(self.right_panel, stretch=1)
-
-        # Signals
-        self.btn_exit.clicked.connect(self._confirm_exit)
-        self.btn_clear.clicked.connect(self._clear)
-        self.btn_calc.clicked.connect(self._calculate)
-        self.method_combo.currentIndexChanged.connect(self._on_method_changed)
-        self._on_method_changed()
-
-    def _apply_style(self):
-        # Minimal style; keep compatible with your existing background/assets.
-        self.setStyleSheet("""
-        QMainWindow { background: #0b1220; }
-        #LeftPanel, #RightPanel { background: rgba(10, 18, 32, 0.75); border-radius: 18px; }
-        QLabel { color: #e6eefc; font-family: Segoe UI; }
-        #TitleLabel { color: #ffffff; }
-        QLineEdit, QComboBox, QDoubleSpinBox {
-            background: rgba(255,255,255,0.08);
-            color: #ffffff;
-            border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 10px;
-            padding: 6px;
-        }
-        QPushButton {
-            background: #0b67c2;
-            color: white;
-            border: none;
-            border-radius: 12px;
-            padding: 10px;
-            font-weight: 600;
-        }
-        QPushButton:hover { background: #0a5aa8; }
-        QTableWidget { background: rgba(0,0,0,0.35); color: #e6eefc; gridline-color: rgba(255,255,255,0.12); }
-        QHeaderView::section { background: rgba(255,255,255,0.10); color: #ffffff; padding: 6px; border: none; }
-        #StatusLabel { color: #b9d3ff; }
+        # Mejorar la lista desplegable (espaciado/padding) sin afectar el tema general
+        view = QListView()
+        view.setSpacing(4)
+        self.metodo_menu.setView(view)
+        self.metodo_menu.setStyleSheet("""
+            QComboBox QAbstractItemView::item { min-height: 22px; padding: 4px 8px; }
         """)
 
-    # ---------------- behavior ----------------
-    def _on_method_changed(self):
-        key = self.method_combo.currentData()
-        spec = next((m for m in METHODS if m.key == key), None)
-        needs_g = bool(spec.needs_g) if spec else False
-        self.g_edit.setEnabled(needs_g)
-        if not needs_g:
-            self.g_edit.setPlaceholderText("(no requerido para este método)")
-        else:
-            self.g_edit.setPlaceholderText("Ej: x1**2 + x2**2 - 1  (<= 0)")
+        self.metodo_menu.currentIndexChanged.connect(self.on_metodo_change)
+        form.addWidget(self.metodo_menu, 0, 1, 1, 3)
 
-    def _confirm_exit(self):
-        resp = QMessageBox.question(
-            self,
-            "Salir",
-            "¿Seguro que quieres salir?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if resp == QMessageBox.Yes:
-            self.close()
+        # Función (DESPUÉS DEL MÉTODO)
+        self.lbl_func = QLabel("Función f(x):")
+        form.addWidget(self.lbl_func, 1, 0)
+        self.func_input = QLineEdit()
+        self.func_input.setPlaceholderText("Ej: -(x-3)**2 + 10")
+        form.addWidget(self.func_input, 1, 1, 1, 3)
 
-    def _clear(self):
-        self.f_edit.clear()
-        self.g_edit.clear()
-        self.vars_edit.clear()
-        self.x0_edit.clear()
+        # Bloque MD (debajo del método; se muestra solo si el método es MD)
+        self.md_group = QFrame()
+        self.md_group.setObjectName("mdGroup")
+        md = QGridLayout(self.md_group)
+        md.setContentsMargins(0, 0, 0, 0)
+        md.setHorizontalSpacing(10)
+        md.setVerticalSpacing(10)
+
+        self.lbl_constraint = QLabel("Restricción g(x):")
+        self.constraint_input = QLineEdit()
+        self.constraint_input.setPlaceholderText("Ej: x1**2 + x2**2 - 1")
+        self.constraint_input.setMinimumWidth(180)
+        md.addWidget(self.lbl_constraint, 0, 0)
+        md.addWidget(self.constraint_input, 0, 1, 1, 3)
+
+        self.lbl_vars = QLabel("Variables:")
+        self.vars_input = QLineEdit()
+        self.vars_input.setPlaceholderText("Ej: x1 x2")
+        self.vars_input.setMinimumWidth(180)
+
+        self.lbl_x0 = QLabel("x0 (coma):")
+        self.x0_input = QLineEdit()
+        self.x0_input.setPlaceholderText("Ej: 0.5, 0.5")
+        self.x0_input.setMinimumWidth(180)
+
+        md.addWidget(self.lbl_vars, 1, 0)
+        md.addWidget(self.vars_input, 1, 1, 1, 3)
+
+        # x0 debajo de Variables (mejora de legibilidad)
+        md.addWidget(self.lbl_x0, 2, 0)
+        md.addWidget(self.x0_input, 2, 1, 1, 3)
+
+        # Peso (w) para Suma Ponderada
+        self.lbl_weight = QLabel("Peso (w):")
+        self.weight_spin = QDoubleSpinBox()
+        self.weight_spin.setRange(0.0, 1.0)
+        self.weight_spin.setSingleStep(0.1)
+        self.weight_spin.setValue(0.5)
+        md.addWidget(self.lbl_weight, 3, 2)
+        md.addWidget(self.weight_spin, 3, 3)
+
+        form.addWidget(self.md_group, 2, 0, 1, 4)
+        self.md_group.hide()
+
+        # Mínimo / Máximo
+        form.addWidget(QLabel("mínimo:"), 3, 0)
+        self.min_spin = QDoubleSpinBox()
+        self.min_spin.setRange(-1e9, 1e9)
+        self.min_spin.setDecimals(6)
+        self.min_spin.setValue(0.0)
+        form.addWidget(self.min_spin, 3, 1)
+
+        form.addWidget(QLabel("máximo:"), 4, 0)
+        self.max_spin = QDoubleSpinBox()
+        self.max_spin.setRange(-1e9, 1e9)
+        self.max_spin.setDecimals(6)
+        self.max_spin.setValue(5.0)
+        form.addWidget(self.max_spin, 4, 1)
+
+        # Tolerancia (solo Fibonacci)
+        self.tol_label = QLabel("tolerancia:")
+        self.tol_spin = QDoubleSpinBox()
+        self.tol_spin.setDecimals(8)
+        self.tol_spin.setRange(1e-12, 1e6)
+        self.tol_spin.setValue(1e-3)
+        self.tol_spin.setSingleStep(1e-3)
+        form.addWidget(self.tol_label, 5, 0)
+        form.addWidget(self.tol_spin, 5, 1)
+
+        left_layout.addLayout(form)
+
+        # Spacer para bajar los botones
+        left_layout.addItem(QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Buttons
+        btn_row1 = QHBoxLayout()
+        self.btn_calc = QPushButton("Calcular")
+        self.btn_calc.setFixedHeight(44)
+        self.btn_calc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_calc.clicked.connect(self.ejecutar_metodo)
+        self.btn_clear = QPushButton("Limpiar")
+        self.btn_clear.setFixedHeight(44)
+        self.btn_clear.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_clear.clicked.connect(self.limpiar)
+        btn_row1.addWidget(self.btn_calc)
+        btn_row1.addWidget(self.btn_clear)
+        btn_row1.setStretch(0, 1)
+        btn_row1.setStretch(1, 1)
+        left_layout.addLayout(btn_row1)
+
+        btn_row2 = QHBoxLayout()
+
+        # Exportar (botón con menú desplegable)
+        self.export_btn = QToolButton()
+        self.export_btn.setObjectName("exportButton")
+        self.export_btn.setText("Exportar")
+        self.export_btn.setFixedHeight(44)
+        self.export_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.export_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.export_btn.setPopupMode(QToolButton.InstantPopup)
+
+        export_menu = QMenu(self.export_btn)
+        export_menu.addAction("Exportar CSV", self.exportar_csv)
+        export_menu.addAction("Exportar Excel", self.exportar_excel)
+        export_menu.addAction("Exportar PDF", self.exportar_pdf)
+        self.export_btn.setMenu(export_menu)
+
+        # Salir (mismo tamaño que Calcular)
+        self.btn_exit = QPushButton("Salir")
+        self.btn_exit.setFixedHeight(44)
+        self.btn_exit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_exit.clicked.connect(self._confirm_exit)
+
+        btn_row2.addWidget(self.export_btn)
+        btn_row2.addWidget(self.btn_exit)
+        btn_row2.setStretch(0, 1)
+        btn_row2.setStretch(1, 1)
+        left_layout.addLayout(btn_row2)
+
+        # status line
+        self.status_lbl = QLabel("")
+        self.status_lbl.setObjectName("statusLabel")
+        self.status_lbl.setWordWrap(True)
+        left_layout.addWidget(self.status_lbl)
+
+        # Right dashboard
+        self.right_panel = QFrame()
+        self.right_panel.setObjectName("rightPanel")
+        right_layout = QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(16, 16, 16, 16)
+        right_layout.setSpacing(12)
+
+        dash_title = QLabel("Dashboard")
+        dash_title.setObjectName("dashTitle")
+        right_layout.addWidget(dash_title)
+
+        self.table = QTableWidget()
+        self.table.setObjectName("resultTable")
+        self.table.setAlternatingRowColors(False)
+        self.table.setColumnCount(0)
         self.table.setRowCount(0)
-        self.status.setText("")
-        if hasattr(self.canvas2d, "clear"):
-            self.canvas2d.clear()
-        if hasattr(self.canvas3d, "clear"):
-            self.canvas3d.clear()
+        # Mejoras UI: ocultar numeración de filas (recuadro rojo) y hacer cabeceras legibles
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(True)
+        right_layout.addWidget(self.table, 1)
 
-    def _fill_table(self, rows: List[Dict[str, Any]]):
+        self.plot_frame = QFrame()
+        self.plot_frame.setObjectName("plotFrame")
+        self.plot_layout = QVBoxLayout(self.plot_frame)
+        self.plot_layout.setContentsMargins(0, 0, 0, 0)
+        self.plot_layout.setSpacing(0)
+
+        self.plot_placeholder = QLabel("Ejecute un método para ver la gráfica.")
+        self.plot_placeholder.setAlignment(Qt.AlignCenter)
+        self.plot_placeholder.setObjectName("plotPlaceholder")
+        self.plot_layout.addWidget(self.plot_placeholder)
+
+        right_layout.addWidget(self.plot_frame, 4)
+
+        root.addWidget(self.left_panel)
+        root.addWidget(self.right_panel, 1)
+
+        self._install_spanish_context_menus()
+        self.resize(1200, 700)
+
+    def _apply_styles(self):
+        # estilos: paneles oscuros con texto blanco; menús contextuales (click derecho) blancos
+        self.setStyleSheet("""
+        QMainWindow { background: transparent; }
+        QFrame#leftPanel, QFrame#rightPanel {
+            background-color: rgba(2, 6, 23, 0.78);
+            border-radius: 18px;
+        }
+        QLabel { color: white; font-size: 12px; }
+        QLabel#panelTitle { font-size: 20px; font-weight: 800; }
+        QLabel#dashTitle { font-size: 20px; font-weight: 800; }
+        QLabel#statusLabel { color: #d6e0ff; font-size: 12px; }
+        QLineEdit, QComboBox, QDoubleSpinBox {
+            background-color: rgba(255,255,255,0.10);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 10px;
+            padding: 6px 10px;
+            min-height: 30px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: rgba(9, 12, 20, 0.98);
+            color: white;
+            selection-background-color: rgba(0, 140, 255, 0.35);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        QPushButton {
+            background-color: rgba(0, 140, 255, 0.55);
+            color: white;
+            border: 0px;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font-weight: 700;
+        }
+        QPushButton:hover { background-color: rgba(0, 140, 255, 0.70); }
+        QPushButton:pressed { background-color: rgba(0, 140, 255, 0.85); }
+
+
+        QToolButton#exportButton {
+            background-color: rgba(0, 140, 255, 0.55);
+            color: white;
+            border: 0px;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font-weight: 700;
+        }
+        QToolButton#exportButton:hover { background-color: rgba(0, 140, 255, 0.70); }
+        QToolButton#exportButton:pressed { background-color: rgba(0, 140, 255, 0.85); }
+
+        QComboBox#exportCombo {
+            background-color: rgba(0, 140, 255, 0.55);
+            color: white;
+            border: 0px;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font-weight: 700;
+            min-height: 30px;
+        }
+        QComboBox#exportCombo:hover { background-color: rgba(0, 140, 255, 0.70); }
+        QComboBox#exportCombo::drop-down { border: 0px; width: 30px; }
+        QComboBox#exportCombo::down-arrow { /* default arrow */ }
+
+
+        QTableWidget#resultTable {
+            alternate-background-color: rgba(0,0,0,0.45);
+            background-color: rgba(0,0,0,0.55);
+            color: white;
+            gridline-color: rgba(255,255,255,0.10);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 12px;
+        }
+        QHeaderView::section {
+            background-color: rgba(0,0,0,0.55);
+            color: white;
+            border: 0px;
+            padding: 6px;
+            font-weight: 700;
+        }
+        QTableCornerButton::section {
+            background-color: rgba(0,0,0,0.55);
+            border: 0px;
+        }
+        QTableWidget::item { padding: 4px; background-color: rgba(0,0,0,0.35); color: white; }
+        QTableWidget::item:alternate { background-color: rgba(0,0,0,0.35); }
+        QTableWidget::item:disabled { color: rgba(255,255,255,0.75); }
+        QTableWidget::item:selected { background-color: rgba(0, 140, 255, 0.30); }
+
+        QLabel#plotPlaceholder { color: rgba(255,255,255,0.85); }
+
+        /* Menú contextual (click derecho) */
+        QMenu {
+            background-color: rgba(9, 12, 20, 0.98);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        QMenu::item:selected { background-color: rgba(0, 140, 255, 0.35); }
+
+        """)
+
+    def _apply_background(self):
+        # Fondo: Menu/Fondo/Imgen de fondo.jpg
+        bg_path = resource_path(os.path.join("Menu", "Fondo", "Imgen de fondo.jpg"))
+        if not os.path.exists(bg_path):
+            bg_path = resource_path(os.path.join("Menu", "Fondo", "Imagen de fondo.jpg"))
+        if not os.path.exists(bg_path):
+            return
+
+        # usar un label como wallpaper
+        self._bg_label = QLabel(self)
+        self._bg_label.setObjectName("bgLabel")
+        self._bg_label.setScaledContents(True)
+        pix = QPixmap(bg_path)
+        self._bg_label.setPixmap(pix)
+        self._bg_label.lower()
+        self._bg_label.setGeometry(self.rect())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_bg_label"):
+            self._bg_label.setGeometry(self.rect())
+
+    def _find_icon(self) -> Optional[str]:
+        for rel in [
+            os.path.join("Menu", "WindowsIcon-min.ico"),
+            os.path.join("Menu", "WindowsIcon.ico"),
+            os.path.join("Menu", "WindowsIcon-min.png"),
+        ]:
+            p = resource_path(rel)
+            if os.path.exists(p):
+                return p
+        return None
+
+    # ---------------- Behaviors ----------------
+
+    def on_metodo_change(self):
+        metodo = self.metodo_menu.currentText()
+        is_fibo = (metodo == "Fibonacci")
+        is_md = metodo.startswith("MD:")
+        is_weighted = "Suma Ponderada" in metodo
+
+        # Mostrar nombre completo (tooltip) y asegurar que se vea el inicio del texto
+        self.metodo_menu.setToolTip(metodo)
+        if self.metodo_menu.isEditable() and self.metodo_menu.lineEdit() is not None:
+            self.metodo_menu.lineEdit().setCursorPosition(0)
+
+        # Tolerancia (solo Fibonacci)
+        self.tol_label.setVisible(is_fibo)
+        self.tol_spin.setVisible(is_fibo)
+
+        # Bloque MD: visible solo si método es multidimensional
+        self.md_group.setVisible(is_md)
+
+        # Peso solo para Suma Ponderada (dentro del bloque MD)
+        self.lbl_weight.setVisible(is_weighted)
+        self.weight_spin.setVisible(is_weighted)
+
+        # Etiquetas dinámicas
+        self.lbl_func.setText("Función f1(x):" if is_weighted else "Función f(x):")
+        self.lbl_constraint.setText("Función f2(x):" if is_weighted else "Restricción g(x):")
+
+        # Intervalo solo para métodos 1D
+        self.min_spin.setEnabled(not is_md)
+        self.max_spin.setEnabled(not is_md)
+
+        # Limpieza opcional al salir de MD para evitar confusión
+        if not is_md:
+            self.constraint_input.clear()
+            self.vars_input.clear()
+            self.x0_input.clear()
+
+    def limpiar(self):
+        self.status_lbl.setText("")
+        self.table.clear()
         self.table.setRowCount(0)
-        for r in rows:
-            k = self.table.rowCount()
-            self.table.insertRow(k)
-            for c, key in enumerate(["k", "x_k", "x_k_str", "f_k", "grad_norm", "alpha_k"]):
-                val = r.get(key, "")
-                self.table.setItem(k, c, QTableWidgetItem(str(val)))
+        self.table.setColumnCount(0)
 
-    def _calculate(self):
+        # limpiar gráfica
+        if self._canvas is not None:
+            self.plot_layout.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas = None
+        self.plot_placeholder.show()
+
+    # ---------------- Core logic ----------------
+    def _parse_function(self, expr: str) -> Callable[[float], float]:
+        expr = expr.strip()
+        if not expr:
+            raise ValueError("Debe ingresar una función.")
+
+        def f(x):
+            return eval(expr, {"__builtins__": {}}, {"x": x, "np": np, **SAFE_MATH})
+
+        # prueba rápida
+        _ = f(0.0)
+        return f
+
+    def _parse_md_x0(self, s: str) -> List[float]:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Para métodos MD, debe ingresar x0 (ej: 0.5, 0.5).")
         try:
-            method_key = self.method_combo.currentData()
-            f_text = self.f_edit.text().strip()
-            g_text = self.g_edit.text().strip()
-            var_names = _parse_vars(self.vars_edit.text())
-            x0 = _parse_x0(self.x0_edit.text())
-            minv = float(self.min_spin.value())
-            maxv = float(self.max_spin.value())
+            return [float(x.strip()) for x in s.split(",") if x.strip()]
+        except Exception:
+            raise ValueError("x0 inválido. Use valores separados por coma. Ej: 0.5, 0.5")
 
-            if not f_text:
-                raise ValueError("Debes escribir f(x).")
-            if not var_names:
-                # default: 1D variable x
-                var_names = ["x"] if len(x0) <= 1 else [f"x{i+1}" for i in range(len(x0))]
+    def _parse_md_vars(self, s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Para métodos MD, debe ingresar las variables (ej: x1 x2).")
+        return s
 
-            # ensure x0 length
-            if not x0:
-                x0 = [0.5] * len(var_names)
+    def _parse_md_constraint(self, s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            raise ValueError("Debe ingresar la restricción g(x) o función f2(x).")
+        return s
 
-            # Prepare plotting function
-            f_np = _compile_sympy_func(f_text, var_names)
+    def _md_diag(self) -> str:
+        return "Verifique que 'multi-dimensionals/wrappers.py' exista y tenga las dependencias (sympy, scipy)."
 
-            # Draw base function (contour/surface) if 2 variables
-            if len(var_names) >= 2 and hasattr(self.canvas2d, "set_contour"):
-                X, Y = _grid(minv, maxv, n=90)
-                Z = f_np(X, Y)
-                self.canvas2d.set_contour(X, Y, Z)
-                if hasattr(self.canvas3d, "set_surface"):
-                    self.canvas3d.set_surface(X, Y, Z)
+    def _auto_params(self, a: float, b: float) -> Dict[str, float]:
+        if a == b:
+            b = a + 1.0
+        if a > b:
+            a, b = b, a
+        x0 = (a + b) / 2.0
+        span = max(abs(b - a), 1e-6)
+        paso = span / 50.0
+        max_iter = 200
+        return {"a": a, "b": b, "x0": x0, "paso": paso, "max_iter": max_iter}
 
-            # Execute method
-            table_rows: List[Dict[str, Any]] = []
-            path_xy: List[Tuple[float, float]] = []
+    def ejecutar_metodo(self):
+        try:
+            expr = self.func_input.text().strip()
+            metodo = self.metodo_menu.currentText()
 
-            if method_key == "armijo_1d":
-                if _armijo is None:
-                    raise ImportError("armijo.py no se pudo importar.")
-                func1 = lambda x: float(_compile_sympy_func(f_text, [var_names[0]])(x))
-                a, b = minv, maxv
-                xopt, fopt, hist = _armijo.metodo_armijo(func1, a, b, return_history=True)
-                table_rows = [{"k": i, "x_k": h.get("x_k",""), "x_k_str": h.get("x_k",""), "f_k": h.get("f_k",""), "grad_norm": h.get("grad_norm",""), "alpha_k": h.get("alpha_k","")} for i,h in enumerate(hist or [])]
-                # 2D plot for 1D: y=f(x), path on x axis
-                if hasattr(self.canvas2d, "ax"):
-                    self.canvas2d.ax.clear()
-                    xs = np.linspace(a, b, 400)
-                    ys = _compile_sympy_func(f_text, [var_names[0]])(xs)
-                    self.canvas2d.ax.plot(xs, ys, linewidth=2.0)
-                    if hist:
-                        xs_k = [float(h["x_k"]) for h in hist if "x_k" in h]
-                        ys_k = [_compile_sympy_func(f_text, [var_names[0]])(xk) for xk in xs_k]
-                        self.canvas2d.ax.plot(xs_k, ys_k, linewidth=1.5)
-                        self.canvas2d.ax.scatter(xs_k, ys_k, s=35)
-                    self.canvas2d.ax.set_title("Gráfica 2D")
-                    self.canvas2d.ax.grid(True, alpha=0.3)
-                    self.canvas2d.draw_idle()
-                self.status.setText(f"x*={xopt}, f*={fopt}")
+            # --- Ejecución de Métodos Multidimensionales ---
+            if metodo.startswith("MD:"):
+                func_str = expr
+                constraint_str = self._parse_md_constraint(self.constraint_input.text())
+                var_str = self._parse_md_vars(self.vars_input.text())
+                x0_md = self._parse_md_x0(self.x0_input.text())
+                weight_val = self.weight_spin.value()
 
-            elif method_key == "wolfe_1d":
-                if _wolfe is None:
-                    raise ImportError("wolfe.py no se pudo importar.")
-                func1 = lambda x: float(_compile_sympy_func(f_text, [var_names[0]])(x))
-                a, b = minv, maxv
-                xopt, fopt, hist = _wolfe.metodo_wolfe(func1, a, b, return_history=True)
-                table_rows = [{"k": i, "x_k": h.get("x_k",""), "x_k_str": h.get("x_k",""), "f_k": h.get("f_k",""), "grad_norm": h.get("grad_norm",""), "alpha_k": h.get("alpha_k","")} for i,h in enumerate(hist or [])]
-                self.status.setText(f"x*={xopt}, f*={fopt}")
+                try:
+                    _load_md_wrappers_by_path()
+                except Exception as e:
+                    raise ImportError(f"Error cargando wrappers MD: {e}")
 
-            elif method_key == "fibonacci_1d":
-                if _fibo is None:
-                    raise ImportError("fibonacci.py no se pudo importar.")
-                func1 = lambda x: float(_compile_sympy_func(f_text, [var_names[0]])(x))
-                a, b = minv, maxv
-                xopt, fopt, hist = _fibo.metodo_fibonacci(func1, a, b, return_history=True)
-                table_rows = [{"k": i, "x_k": h.get("x_k",""), "x_k_str": h.get("x_k",""), "f_k": h.get("f_k",""), "grad_norm": "", "alpha_k": ""} for i,h in enumerate(hist or [])] if isinstance(hist, list) else []
-                self.status.setText(f"x*={xopt}, f*={fopt}")
+                out = None
+                if metodo == "MD: Penalización (Newton)":
+                    if md_penalty_newton:
+                        out = md_penalty_newton(func_str, constraint_str, var_str, x0_md)
+                if metodo == "MD: Barrera (Newton)":
+                    if md_barrier_newton:
+                        out = md_barrier_newton(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Penalización (BFGS)":
+                    if md_penalty_bfgs:
+                        out = md_penalty_bfgs(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Penalización (Nelder-Mead)":
+                    if md_penalty_nelder:
+                        out = md_penalty_nelder(func_str, constraint_str, var_str, x0_md)
+                elif metodo == "MD: Suma Ponderada (Newton)":
+                    if md_weighted_sum_newton:
+                        out = md_weighted_sum_newton(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                elif metodo == "MD: Suma Ponderada (BFGS)":
+                    if md_weighted_sum_bfgs:
+                        out = md_weighted_sum_bfgs(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                elif metodo == "MD: Suma Ponderada (Nelder-Mead)":
+                    if md_weighted_sum_nelder:
+                        out = md_weighted_sum_nelder(func_str, constraint_str, var_str, x0_md, weight=weight_val)
+                
+                if out is None:
+                    raise ImportError(f"El método '{metodo}' no se cargó correctamente.\n" + self._md_diag())
 
-            elif method_key == "busqueda_local_1d":
-                if _blocal is None:
-                    raise ImportError("busqueda_local.py no se pudo importar.")
-                func1 = lambda x: float(_compile_sympy_func(f_text, [var_names[0]])(x))
-                xopt, fopt, hist = _blocal.busqueda_local(func1, float(x0[0]), return_history=True)
-                table_rows = [{"k": i, "x_k": h.get("x_k",""), "x_k_str": h.get("x_k",""), "f_k": h.get("f_k",""), "grad_norm": "", "alpha_k": ""} for i,h in enumerate(hist or [])] if isinstance(hist, list) else []
-                self.status.setText(f"x*={xopt}, f*={fopt}")
+                # Procesar salida MD (x_opt, f_opt, log_data)
+                parsed = self._parse_method_output(metodo, out)
+                resumen = parsed["resumen"]
+                history = parsed["history"]
 
-            else:
-                # MD family
-                if method_key in ("penalty_newton","barrier_newton","penalty_bfgs","weighted_sum_bfgs","penalty_nelder","weighted_sum_nelder","weighted_sum_newton"):
-                    if _wrap is None:
-                        raise ImportError("No se pudo importar multi-dimensionals/wrappers.py")
-                    if not g_text:
-                        raise ValueError("Este método requiere g(x) (<=0).")
-
-                    fn_map = {
-                        "penalty_newton": "penalty_method_newton",
-                        "barrier_newton": "barrier_method_newton",
-                        "penalty_bfgs": "penalty_method_bfgs",
-                        "weighted_sum_bfgs": "weighted_sum_bfgs",
-                        "penalty_nelder": "penalty_method_nelder",
-                        "weighted_sum_nelder": "weighted_sum_nelder",
-                        "weighted_sum_newton": "weighted_sum_newton",
-                    }
-                    fn_name = fn_map[method_key]
-                    fn = _safe_getattr(_wrap, fn_name)
-                    if fn is None:
-                        raise ImportError(f"wrappers.py no tiene '{fn_name}'")
-                    xopt, fopt, hist = fn(f_text, g_text, " ".join(var_names), x0)
-                    # history may be list of dict
-                    path_xy = _history_to_path_xy(hist)
-                    table_rows = []
-                    if isinstance(hist, list):
-                        for i, h in enumerate(hist):
-                            if isinstance(h, dict):
-                                table_rows.append({
-                                    "k": h.get("k", i),
-                                    "x_k": h.get("x_k", ""),
-                                    "x_k_str": h.get("x_k_str", h.get("x_k", "")),
-                                    "f_k": h.get("f_k", ""),
-                                    "grad_norm": h.get("grad_norm", ""),
-                                    "alpha_k": h.get("alpha_k", ""),
-                                })
-                    self.status.setText(f"x*={xopt}, f*={fopt}")
-
-                elif method_key == "md_newton_armijo":
-                    if _md_linesearch is None or not hasattr(_md_linesearch, "newton_armijo"):
-                        raise ImportError("multi-dimensionals/line_search.py no tiene newton_armijo")
-                    xopt, fopt, log_data = _md_linesearch.newton_armijo(f_text, " ".join(var_names), x0)
-                    path_xy = _history_to_path_xy(log_data)
-                    if isinstance(log_data, list):
-                        for i, h in enumerate(log_data):
-                            if isinstance(h, dict):
-                                table_rows.append({
-                                    "k": h.get("k", i),
-                                    "x_k": h.get("x_k", ""),
-                                    "x_k_str": h.get("x_k_str", h.get("x_k", "")),
-                                    "f_k": h.get("f_k", ""),
-                                    "grad_norm": h.get("grad_norm", ""),
-                                    "alpha_k": h.get("alpha_k", ""),
-                                })
-                    self.status.setText(f"x*={xopt}, f*={fopt}")
-
-                elif method_key == "md_newton_wolfe":
-                    if _md_linesearch is None or not hasattr(_md_linesearch, "newton_wolfe_step"):
-                        raise ImportError("multi-dimensionals/line_search.py no tiene newton_wolfe_step")
-                    xopt, fopt, log_data = _md_linesearch.newton_wolfe_step(f_text, " ".join(var_names), x0)
-                    path_xy = _history_to_path_xy(log_data)
-                    if isinstance(log_data, list):
-                        for i, h in enumerate(log_data):
-                            if isinstance(h, dict):
-                                table_rows.append({
-                                    "k": h.get("k", i),
-                                    "x_k": h.get("x_k", ""),
-                                    "x_k_str": h.get("x_k_str", h.get("x_k", "")),
-                                    "f_k": h.get("f_k", ""),
-                                    "grad_norm": h.get("grad_norm", ""),
-                                    "alpha_k": h.get("alpha_k", ""),
-                                })
-                    self.status.setText(f"x*={xopt}, f*={fopt}")
-
-                elif method_key == "md_wolfe_line_search":
-                    if _md_linesearch is None or not hasattr(_md_linesearch, "wolfe_line_search"):
-                        raise ImportError("multi-dimensionals/line_search.py no tiene wolfe_line_search")
-                    # Here we just run and show outputs (this is a line-search primitive)
-                    out = _md_linesearch.wolfe_line_search(f_text, " ".join(var_names), x0)
-                    self.status.setText(f"Salida: {out}")
-
-                elif method_key in ("md_fibonacci_search","md_local_search","md_scipy_minimize"):
-                    if _md_localsearch is None:
-                        raise ImportError("multi-dimensionals/localsearch.py no disponible")
-                    fn_map = {
-                        "md_fibonacci_search": "fibonacci_search",
-                        "md_local_search": "local_search",
-                        "md_scipy_minimize": "scipy_minimize",
-                    }
-                    fn = _safe_getattr(_md_localsearch, fn_map[method_key])
-                    if fn is None:
-                        raise ImportError(f"localsearch.py no tiene {fn_map[method_key]}")
-                    out = fn(f_text, " ".join(var_names), x0)
-                    self.status.setText(f"Salida: {out}")
-
+                self._current_expr = expr
+                self._update_table(history)
+                
+                # Mostrar resultado en status
+                if "x_opt" in resumen:
+                    self.status_lbl.setText(f"✓ {metodo} → x*={resumen['x_opt']}, f*={resumen.get('f_opt','?')}")
                 else:
-                    raise ValueError("Método no reconocido.")
+                    self.status_lbl.setText(f"✓ {metodo} finalizado.")
 
-            # Update table
-            if table_rows:
-                self._fill_table(table_rows)
+                # Graficar MD (pasamos f=None porque ya tenemos los valores en history)
+                self._render_plot(metodo, None, history)
+                return
 
-            # Update plots with path
-            if len(var_names) >= 2:
-                if path_xy and hasattr(self.canvas2d, "set_path"):
-                    self.canvas2d.set_path(path_xy)
-                # 3D path: z=f(x,y)
-                if path_xy and hasattr(self.canvas3d, "set_path_xyz"):
-                    zs = [float(f_np(x, y)) for x, y in path_xy]
-                    path_xyz = [(x, y, z) for (x, y), z in zip(path_xy, zs)]
-                    self.canvas3d.set_path_xyz(path_xyz)
+            # --- Ejecución de Métodos 1D ---
+            f = self._parse_function(expr)
+
+            a_in = float(self.min_spin.value())
+            b_in = float(self.max_spin.value())
+            params = self._auto_params(a_in, b_in)
+            a, b, x0, paso, max_iter = params["a"], params["b"], params["x0"], params["paso"], params["max_iter"]
+
+            metodo = self.metodo_menu.currentText()
+
+            # Ejecutar método con compatibilidad
+            if metodo == "Búsqueda Local":
+                if busqueda_local is None:
+                    raise ImportError("No se pudo importar busqueda_local()")
+                out = busqueda_local(f, x0=x0, paso=paso, max_iter=max_iter, tolerancia=1e-5, return_history=True)
+
+            elif metodo == "Fibonacci":
+                tol = float(self.tol_spin.value())
+                fn = metodo_fibonacci if metodo_fibonacci is not None else fibonacci_search
+                if fn is None:
+                    raise ImportError("No se pudo importar metodo_fibonacci()/fibonacci_search()")
+                out = fn(f, a=a, b=b, tolerancia=tol, max_n=max_iter, return_history=True)
+
+            elif metodo == "Armijo":
+                if metodo_armijo is not None:
+                    out = metodo_armijo(f, a=a, b=b, max_iter=max_iter, return_history=True)
+                elif armijo_search is not None:
+                    x_new, f_new, iters, dist, hist = armijo_search(f, x0=x0, alpha0=1.0, rho=0.5, c=1e-4, max_iter=max_iter, return_history=True)
+                    out = (x_new, f_new, iters, dist, hist)
+                else:
+                    raise ImportError("No se pudo importar metodo_armijo()/armijo_search()")
+
+            elif metodo == "Wolfe":
+                if metodo_wolfe is not None:
+                    out = metodo_wolfe(f, a=a, b=b, max_iter=max_iter, return_history=True)
+                elif wolfe_search is not None:
+                    x_new, f_new, iters, dist, hist = wolfe_search(f, x0=x0, alpha0=1.0, rho=0.5, c1=1e-4, c2=0.9, max_iter=max_iter, return_history=True)
+                    out = (x_new, f_new, iters, dist, hist)
+                else:
+                    raise ImportError("No se pudo importar metodo_wolfe()/wolfe_search()")
+            else:
+                raise ValueError("Método no soportado.")
+
+            parsed = self._parse_method_output(metodo, out)
+            resumen = parsed["resumen"]
+            history = parsed["history"]
+
+            # actualizar tabla + gráfica
+            self._current_expr = expr
+            self._update_table(history)
+            self._render_plot(metodo, f, history)
+
+            # Guardar para exportación
+            img_path = self._save_plot_image(metodo, f, history)
+            if ReportItem is not None:
+                item = ReportItem(funcion=expr, metodo=metodo, iteraciones=history, resumen=resumen, grafica_path=img_path)
+            else:
+                item = None
+
+            self._results.setdefault(expr, {})[metodo] = {"resumen": resumen, "history": history, "item": item}
+
+            # status
+            if "x_opt" in resumen and "f_opt" in resumen:
+                try:
+                    self.status_lbl.setText(f"✓ {metodo} → x*={float(resumen['x_opt']):.6g}, f(x*)={float(resumen['f_opt']):.6g}")
+                except Exception:
+                    self.status_lbl.setText(f"✓ {metodo} ejecutado.")
+            else:
+                self.status_lbl.setText(f"✓ {metodo} ejecutado.")
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Ocurrió un error al ejecutar el método:\n{e}")
+            self._show_msg("Error", f"Ocurrió un error al ejecutar el método:\n{e}", icon=QMessageBox.Critical)
+
+    def _update_table(self, history: List[Dict[str, Any]]):
+        self.table.clear()
+        if not history:
+            self.table.setRowCount(0)
+            self.table.setColumnCount(0)
+            return
+
+        columns = list(history[0].keys())
+        self.table.setColumnCount(len(columns))
+        self.table.setHorizontalHeaderLabels(columns)
+        self.table.setRowCount(len(history))
+
+        for r, row in enumerate(history):
+            for c, col in enumerate(columns):
+                val = row.get(col, "")
+                item = QTableWidgetItem(str(val))
+                item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+                item.setForeground(QBrush(QColor(255, 255, 255)))
+                item.setBackground(QBrush(QColor(0, 0, 0, 115)))
+                self.table.setItem(r, c, item)
+
+        self.table.resizeColumnsToContents()
+
+    def _history_to_xyz(self, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]):
+        """
+        Convierte el historial en coordenadas para graficar.
+        - 1D: (Iteración, x, f(x))
+        - MD (2+ vars): (x1, x2, f(x))
+        """
+        axis1, axis2, axis3 = [], [], []
+        labels = ["Iteración", "x", "f(x)"]
+        is_md_plot = False
+
+        for i, row in enumerate(history, start=1):
+            it = row.get("iter", row.get("k", i))
+            x = row.get("x", row.get("x_k", None))
+            
+            # Intentar obtener f(x) del historial
+            z = row.get("f(x)", row.get("fx", row.get("f", row.get("f_k", None))))
+            
+            # Lógica para extraer coordenadas
+            if x is None:
+                # Casos especiales 1D (Fibonacci usa x1, x2, a, b)
+                if "x1" in row and "x2" in row:
+                    x = (row["x1"] + row["x2"]) / 2.0
+                elif "a" in row and "b" in row:
+                    x = (row["a"] + row["b"]) / 2.0
+            
+            if x is None:
+                continue
+
+            # Si x es una lista (Multidimensional)
+            if isinstance(x, (list, np.ndarray)):
+                if len(x) >= 2:
+                    # Graficar x1 vs x2 vs f(x)
+                    is_md_plot = True
+                    val_x1 = float(x[0]) if x[0] is not None else 0.0
+                    val_x2 = float(x[1]) if x[1] is not None else 0.0
+                    val_z = float(z) if z is not None else 0.0
+                    axis1.append(val_x1)
+                    axis2.append(val_x2)
+                    axis3.append(val_z)
+                else:
+                    # MD pero solo 1 variable (raro, tratar como 1D)
+                    axis1.append(float(it))
+                    axis2.append(float(x[0]))
+                    axis3.append(float(z) if z is not None else 0.0)
+            else:
+                # Caso 1D estándar
+                if z is None and f is not None:
+                    z = float(f(float(x)))
+                axis1.append(float(it))
+                axis2.append(float(x))
+                axis3.append(float(z) if z is not None else 0.0)
+
+        if is_md_plot:
+            labels = ["x1", "x2", "f(x)"]
+            
+        return np.array(axis1), np.array(axis2), np.array(axis3), labels
+
+    def _render_plot(self, metodo: str, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]):
+        d1, d2, d3, labels = self._history_to_xyz(f, history)
+        if d1.size == 0:
+            return
+
+        self.plot_placeholder.hide()
+
+        # Re-crear el canvas por ejecución para que SIEMPRE coincida con el método ejecutado
+        if self._canvas is not None:
+            self.plot_layout.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas = None
+
+        titulo = f"Gráfica 3D - {metodo}"
+        self._canvas = Rotating3DCanvas(self.plot_frame, title=titulo)
+        self.plot_layout.addWidget(self._canvas)
+
+        self._canvas.set_data(d1, d2, d3, labels=labels)
+        self._canvas.start_rotation()
+
+    def _save_plot_image(self, metodo: str, f: Optional[Callable[[float], float]], history: List[Dict[str, Any]]) -> Optional[str]:
+        # genera PNG 3D para Excel
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from mpl_toolkits.mplot3d import Axes3D  # noqa
+
+            d1, d2, d3, labels = self._history_to_xyz(f, history)
+            if d1.size == 0:
+                return None
+
+            fig = plt.figure(figsize=(7.2, 4.8), dpi=150)
+            ax = fig.add_subplot(111, projection="3d")
+            ax.plot(d1, d2, d3, linewidth=2)
+            ax.scatter([d1[-1]], [d2[-1]], [d3[-1]], s=35)
+            ax.set_title(f"{metodo} - f(x)")
+            ax.set_xlabel(labels[0])
+            ax.set_ylabel(labels[1])
+            ax.set_zlabel(labels[2])
+            fig.tight_layout()
+
+            fd, path = tempfile.mkstemp(prefix="plot_", suffix=".png")
+            os.close(fd)
+            fig.savefig(path, bbox_inches="tight")
+            plt.close(fig)
+            return path
+        except Exception:
+            return None
+
+    # ---------------- Export ----------------
+
+    def _confirm_exit(self):
+        m = QMessageBox(self)
+        m.setWindowTitle("Salir")
+        m.setIcon(QMessageBox.Question)
+        m.setText("¿Está seguro de que desea salir de la aplicación?")
+        m.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        m.setDefaultButton(QMessageBox.No)
+        # Texto y botones legibles (no heredar estilos oscuros globales)
+        m.setStyleSheet(
+            "QLabel{color:#111; font-size:12px;} "
+            "QPushButton{min-width:90px; min-height:30px; font-weight:600;}"
+        )
+        m.button(QMessageBox.Yes).setText("Sí")
+        m.button(QMessageBox.No).setText("No")
+        if m.exec_() == QMessageBox.Yes:
+            self.close()
+    def _on_export_selected(self, idx: int):
+        # idx 0 = "Exportar" (placeholder)
+        if idx <= 0:
+            return
+        choice = self.export_combo.currentText().strip().lower()
+        # volver al placeholder inmediatamente para que el combo actúe como botón desplegable
+        self.export_combo.blockSignals(True)
+        self.export_combo.setCurrentIndex(0)
+        self.export_combo.blockSignals(False)
+
+        if "csv" in choice:
+            self.exportar_csv()
+        elif "excel" in choice:
+            self.exportar_excel()
+        elif "pdf" in choice:
+            self.exportar_pdf()
+
+    def _coerce_history(self, history: Any) -> List[Dict[str, Any]]:
+        if history is None:
+            return []
+        if isinstance(history, list):
+            # asegurar dicts
+            out = []
+            for row in history:
+                if isinstance(row, dict):
+                    out.append(row)
+                elif isinstance(row, (list, tuple)):
+                    out.append({f"c{i+1}": v for i, v in enumerate(row)})
+                else:
+                    out.append({"value": row})
+            return out
+        if isinstance(history, tuple):
+            return self._coerce_history(list(history))
+        if isinstance(history, dict):
+            return [history]
+        return [{"value": history}]
+
+    def _parse_method_output(self, metodo: str, out: Any) -> Dict[str, Any]:
+        """Normaliza salidas de métodos a un dict: {'resumen':..., 'history':...}."""
+        metodo_norm = metodo.lower()
+        resumen: Dict[str, Any] = {"metodo": metodo, "funcion": self.func_input.text().strip()}
+
+        # Búsqueda Local: (x, f, iter, tipo, distancia[, history])
+        if "búsqueda" in metodo_norm or "busqueda" in metodo_norm:
+            if isinstance(out, (tuple, list)):
+                if len(out) >= 5:
+                    x_opt, f_opt, iters, tipo, dist = out[:5]
+                    resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "tipo": tipo, "distancia": dist})
+                history = out[5] if len(out) >= 6 else []
+            else:
+                history = []
+            return {"resumen": resumen, "history": self._coerce_history(history)}
+
+        # Fibonacci: (x_opt, f_opt, iter, tipo, distancia[, history, limit_reached, target])
+        if "fibonacci" in metodo_norm:
+            if isinstance(out, (tuple, list)) and len(out) >= 5:
+                x_opt, f_opt, iters, tipo, dist = out[:5]
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "tipo": tipo, "distancia": dist})
+                history = out[5] if len(out) >= 6 else []
+                if len(out) >= 7:
+                    resumen["limit_reached"] = bool(out[6])
+                if len(out) >= 8:
+                    resumen["target"] = out[7]
+            else:
+                history = []
+            return {"resumen": resumen, "history": self._coerce_history(history)}
+
+        # Armijo/Wolfe wrappers pueden devolver solo history cuando return_history=True
+        if "armijo" in metodo_norm or "wolfe" in metodo_norm:
+            if isinstance(out, list) and (len(out) == 0 or isinstance(out[0], dict)):
+                history = out
+                # intentar inferir x_opt/f_opt del último registro
+                if history:
+                    last = history[-1]
+                    for k in ("x_new", "x", "x_opt", "x*"):
+                        if k in last:
+                            try:
+                                resumen["x_opt"] = float(last[k])
+                                break
+                            except Exception:
+                                pass
+                    for k in ("f_new", "fx", "f(x)", "f_opt"):
+                        if k in last:
+                            try:
+                                resumen["f_opt"] = float(last[k])
+                                break
+                            except Exception:
+                                pass
+                    resumen["iter"] = len(history)
+                return {"resumen": resumen, "history": self._coerce_history(history)}
+            # si devuelve tuple: (x_new,f_new,iters,dist[,history])
+            if isinstance(out, (tuple, list)) and len(out) >= 4:
+                x_opt, f_opt, iters, dist = out[:4]
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": iters, "distancia": dist})
+                history = out[4] if len(out) >= 5 else []
+                return {"resumen": resumen, "history": self._coerce_history(history)}
+            return {"resumen": resumen, "history": []}
+
+        # MD Wrappers: (x_opt, f_opt, log_data)
+        if metodo.startswith("MD:"):
+            if isinstance(out, tuple) and len(out) == 3:
+                x_opt, f_opt, history = out
+                resumen.update({"x_opt": x_opt, "f_opt": f_opt, "iter": len(history)})
+                return {"resumen": resumen, "history": self._coerce_history(history)}
+
+        return {"resumen": resumen, "history": []}
+
+    def exportar_csv(self):
+        expr = self.func_input.text().strip()
+        if not expr or expr not in self._results or not self._results[expr]:
+            self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
+            return
+
+        metodo = self.metodo_menu.currentText()
+        data = self._results[expr].get(metodo)
+        if not data:
+            self._show_msg("Aviso", f"No hay resultados guardados para el método '{metodo}'.\nEjecute el método primero.")
+            return
+
+        history = data["history"]
+
+        filepath, _ = QFileDialog.getSaveFileName(self, "Guardar CSV", f"resultados_{metodo}.csv", "CSV (*.csv)")
+        if not filepath:
+            return
+        # Exportación CSV sin pandas (evita dependencia extra)
+        try:
+            with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+                if history:
+                    fieldnames = list(history[0].keys())
+                else:
+                    fieldnames = []
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in history:
+                    writer.writerow(row)
+        except Exception as e:
+            self._show_msg("Error", f"No se pudo exportar el CSV:\n{e}", icon=QMessageBox.Critical)
+            return
+        self._show_msg("Éxito", "Archivo CSV exportado exitosamente.", icon=QMessageBox.Information)
+
+    def exportar_excel(self):
+        expr = self.func_input.text().strip()
+        if not expr or expr not in self._results or not self._results[expr]:
+            self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
+            return
+
+        # un solo excel: una pestaña por método ejecutado
+        items: List[ReportItem] = []
+        for metodo, data in self._results[expr].items():
+            items.append(data["item"])
+
+        default_name = "reporte_optimizacion.xlsx"
+        filepath, _ = QFileDialog.getSaveFileName(self, "Guardar Reporte Excel", default_name, "Excel (*.xlsx)")
+        if not filepath:
+            return
+
+        try:
+            exportar_reporte_excel(items, output_path=filepath, app_title="Optimizador de Funciones")
+            self._show_msg("Éxito", "Reporte Excel exportado exitosamente.", icon=QMessageBox.Information)
+        except Exception as e:
+            # si falla, reportar claro (texto negro en QMessageBox por defecto)
+            self._show_msg("Error", f"No se pudo exportar el Excel:\n{e}", icon=QMessageBox.Critical)
+
+    def exportar_pdf(self):
+        expr = self.func_input.text().strip()
+        if not expr or expr not in self._results or not self._results[expr]:
+            self._show_msg("Aviso", "No hay resultados para exportar para esta función.\nEjecute al menos un método.")
+            return
+        items: List[ReportItem] = []
+        for metodo, data in self._results[expr].items():
+            if data.get("item") is not None:
+                items.append(data["item"])
+        if exportar_reporte_pdf is None:
+            self._show_msg("Error", "No se pudo exportar el PDF: dependencia no disponible (reportlab).", icon=QMessageBox.Critical)
+            return
+        filepath, _ = QFileDialog.getSaveFileName(self, "Guardar Reporte PDF", "reporte_optimizacion.pdf", "PDF (*.pdf)")
+        if not filepath:
+            return
+        try:
+            exportar_reporte_pdf(items, output_path=filepath, app_title="Optimizador de Funciones")
+            self._show_msg("Éxito", "Reporte PDF exportado exitosamente.", icon=QMessageBox.Information)
+        except Exception as e:
+            self._show_msg("Error", f"No se pudo exportar el PDF:\n{e}", icon=QMessageBox.Critical)
+
+    # ---------------- Helpers ----------------
+    def _install_spanish_context_menus(self):
+        # Tabla: menú contextual en español (Copiar, Seleccionar todo)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_context_menu)
+
+        # LineEdits relevantes: menú contextual en español (Cortar/Copiar/Pegar/Seleccionar todo)
+        edits = [self.func_input]
+        for sp in (self.min_spin, self.max_spin, self.tol_spin):
+            le = sp.lineEdit()
+            if le is not None:
+                edits.append(le)
+
+        for le in edits:
+            le.setContextMenuPolicy(Qt.CustomContextMenu)
+            le.customContextMenuRequested.connect(lambda pos, w=le: self._show_lineedit_context_menu(w, pos))
+
+    def _show_table_context_menu(self, pos):
+        menu = QMenu(self.table)
+        act_copy = menu.addAction("Copiar")
+        act_select_all = menu.addAction("Seleccionar todo")
+
+        sel = self.table.selectedRanges()
+        act_copy.setEnabled(bool(sel))
+
+        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if action == act_copy:
+            self._copy_table_selection()
+        elif action == act_select_all:
+            self.table.selectAll()
+
+    def _copy_table_selection(self):
+        sel = self.table.selectedRanges()
+        if not sel:
+            return
+        r = sel[0]
+        rows = []
+        for row in range(r.topRow(), r.bottomRow() + 1):
+            cols = []
+            for col in range(r.leftColumn(), r.rightColumn() + 1):
+                item = self.table.item(row, col)
+                cols.append("" if item is None else item.text())
+            rows.append("\t".join(cols))
+        QApplication.clipboard().setText("\n".join(rows))
+
+    def _show_lineedit_context_menu(self, widget, pos):
+        menu = QMenu(widget)
+        act_cut = menu.addAction("Cortar")
+        act_copy = menu.addAction("Copiar")
+        act_paste = menu.addAction("Pegar")
+        menu.addSeparator()
+        act_select_all = menu.addAction("Seleccionar todo")
+
+        has_sel = widget.hasSelectedText()
+        act_cut.setEnabled(has_sel and not widget.isReadOnly())
+        act_copy.setEnabled(has_sel)
+        act_paste.setEnabled(not widget.isReadOnly())
+
+        action = menu.exec_(widget.mapToGlobal(pos))
+        if action == act_cut:
+            widget.cut()
+        elif action == act_copy:
+            widget.copy()
+        elif action == act_paste:
+            widget.paste()
+        elif action == act_select_all:
+            widget.selectAll()
+
+    def _show_msg(self, title: str, text: str, icon=QMessageBox.Warning):
+        # Forzar legibilidad: el stylesheet global pinta QLabel en blanco.
+        m = QMessageBox(self)
+        m.setWindowTitle(title)
+        m.setText(text)
+        m.setIcon(icon)
+        m.setStyleSheet("""
+            QLabel { color: #111; font-size: 12px; }
+            QPushButton { min-width: 90px; padding: 6px 14px; }
+        """)
+        m.exec_()
