@@ -1,132 +1,194 @@
 # canvas_2d.py
+# Canvas 2D (Matplotlib + Qt) con soporte de animación de trayectoria.
 from __future__ import annotations
-
-from typing import Callable, List, Optional, Sequence, Tuple
-
+from typing import Optional, Tuple
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
+# QtCore para QTimer (PyQt6/PyQt5)
+try:
+    from PyQt6 import QtCore
+except Exception:  # PyQt5
+    from PyQt5 import QtCore  # type: ignore
 
 
 class Function2DCanvas(FigureCanvas):
-    """
-    Canvas 2D (Matplotlib + Qt)
-    - Dibuja contornos de f(x1,x2) y la trayectoria de puntos (x1,x2)
-    - Puntos de trayectoria en color distinto de la línea
-    - Interacción: click/drag para mover un punto (callback opcional)
-    """
-
-    def __init__(self, parent=None, title: str = "Gráfica 2D"):
+    def __init__(self, parent=None):
         self.fig = Figure()
         super().__init__(self.fig)
-        self.setSizePolicy(self.sizePolicy().Expanding, self.sizePolicy().Expanding)
         if parent is not None:
             self.setParent(parent)
 
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.90, bottom=0.14)
-        self._title = title
 
-        # data
-        self._X = None
-        self._Y = None
-        self._Z = None
-        self._path_xy: List[Tuple[float, float]] = []
+        # animación
+        self._anim_timer: Optional[QtCore.QTimer] = None
+        self._anim_idx: int = 0
+        self._anim_path: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._traj_line = None
+        self._traj_scatter = None
 
-        # interaction
-        self._sel_idx: Optional[int] = None
-        self._dragging = False
-        self._on_point_changed: Optional[Callable[[int, float, float], None]] = None
+        self._style_axes()
 
-        self._cid_press = self.mpl_connect("button_press_event", self._on_press)
-        self._cid_release = self.mpl_connect("button_release_event", self._on_release)
-        self._cid_move = self.mpl_connect("motion_notify_event", self._on_move)
-
-        self._redraw()
-
-    def set_point_changed_callback(self, fn: Callable[[int, float, float], None]):
-        """fn(idx, x, y) será llamado al hacer click o arrastrar el punto."""
-        self._on_point_changed = fn
-
-    def set_title(self, title: str):
-        self._title = title
-        try:
-            self.ax.set_title(self._title)
-            self.draw_idle()
-        except Exception:
-            pass
+    def _style_axes(self):
+        self.ax.grid(True, alpha=0.25)
 
     def clear(self):
-        self._X = self._Y = self._Z = None
-        self._path_xy = []
-        self._redraw()
-
-    def set_contour(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray):
-        self._X, self._Y, self._Z = X, Y, Z
-        self._redraw()
-
-    def set_path(self, path_xy: Sequence[Sequence[float]]):
-        self._path_xy = [(float(p[0]), float(p[1])) for p in path_xy] if path_xy else []
-        self._redraw()
-
-    def _redraw(self):
+        self.stop_animation()
         self.ax.clear()
-        self.ax.set_title(self._title)
-        self.ax.grid(True, alpha=0.3)
-
-        # Contours
-        if self._X is not None and self._Y is not None and self._Z is not None:
-            try:
-                self.ax.contour(self._X, self._Y, self._Z, levels=20, linewidths=1.0)
-            except Exception:
-                # fallback
-                pass
-
-        # Path: line + points (different styles)
-        if self._path_xy:
-            xs = [p[0] for p in self._path_xy]
-            ys = [p[1] for p in self._path_xy]
-            self.ax.plot(xs, ys, linewidth=2.0)          # line
-            self.ax.scatter(xs, ys, s=35)                # points
-
-        self.fig.tight_layout()
+        self._style_axes()
         self.draw_idle()
 
-    # ---------------- interaction ----------------
-    def _nearest_point(self, x: float, y: float, tol_px: float = 12.0) -> Optional[int]:
-        if not self._path_xy:
-            return None
-        # transform data coords to display coords
-        pts = np.array(self._path_xy, dtype=float)
-        disp = self.ax.transData.transform(pts)
-        q = self.ax.transData.transform(np.array([[x, y]], dtype=float))[0]
-        d = np.sqrt(((disp - q) ** 2).sum(axis=1))
-        i = int(np.argmin(d))
-        return i if d[i] <= tol_px else None
+    def stop_animation(self):
+        if self._anim_timer is not None:
+            try:
+                self._anim_timer.stop()
+            except Exception:
+                pass
+            self._anim_timer = None
 
-    def _on_press(self, event):
-        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
-            return
-        idx = self._nearest_point(event.xdata, event.ydata)
-        if idx is None:
-            return
-        self._sel_idx = idx
-        self._dragging = True
-        if self._on_point_changed:
-            self._on_point_changed(idx, float(event.xdata), float(event.ydata))
+    def set_title(self, title: str):
+        self.ax.set_title(title or "")
+        self.draw_idle()
 
-    def _on_release(self, event):
-        self._dragging = False
-        self._sel_idx = None
+    # ---------------- 1D: f(x) + trayectoria ----------------
+    def plot_1d(self, x: np.ndarray, y: np.ndarray,
+                traj_x: Optional[np.ndarray] = None,
+                traj_y: Optional[np.ndarray] = None,
+                title: str = "Gráfica 2D"):
+        self.stop_animation()
+        self.ax.clear()
+        self._style_axes()
 
-    def _on_move(self, event):
-        if not self._dragging or self._sel_idx is None:
+        # función (un color)
+        self.ax.plot(x, y, color="tab:blue", linewidth=2)
+
+        # trayectoria (otro color)
+        if traj_x is not None and traj_x.size:
+            if traj_y is None or not traj_y.size:
+                traj_y = np.zeros_like(traj_x)
+            self.ax.plot(traj_x, traj_y, linestyle="--", color="tab:orange", linewidth=2)
+            self.ax.scatter(traj_x, traj_y, s=26, color="tab:red", zorder=3)
+
+        self.ax.set_title(title)
+        self.ax.set_xlabel("x")
+        self.ax.set_ylabel("f(x)")
+        self.draw_idle()
+
+    def animate_1d(self, x: np.ndarray, y: np.ndarray,
+                   traj_x: np.ndarray, traj_y: np.ndarray,
+                   title: str = "Gráfica 2D",
+                   interval_ms: int = 60):
+        """Dibuja f(x) y anima la trayectoria punto a punto."""
+        self.stop_animation()
+        self.ax.clear()
+        self._style_axes()
+
+        # función
+        self.ax.plot(x, y, color="tab:blue", linewidth=2)
+
+        # artistas trayectoria (inician vacíos)
+        self._traj_line, = self.ax.plot([], [], linestyle="--", color="tab:orange", linewidth=2)
+        self._traj_scatter = self.ax.scatter([], [], s=26, color="tab:red", zorder=3)
+
+        self.ax.set_title(title)
+        self.ax.set_xlabel("x")
+        self.ax.set_ylabel("f(x)")
+
+        self._anim_path = (np.asarray(traj_x, dtype=float), np.asarray(traj_y, dtype=float))
+        self._anim_idx = 0
+
+        self._anim_timer = QtCore.QTimer(self)
+        self._anim_timer.timeout.connect(self._step_anim_1d)  # type: ignore
+        self._anim_timer.start(max(10, int(interval_ms)))
+        self.draw_idle()
+
+    def _step_anim_1d(self):
+        if self._anim_path is None:
+            self.stop_animation()
             return
-        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+        tx, ty = self._anim_path
+        if tx.size == 0:
+            self.stop_animation()
             return
-        # update point
-        idx = self._sel_idx
-        self._path_xy[idx] = (float(event.xdata), float(event.ydata))
-        if self._on_point_changed:
-            self._on_point_changed(idx, float(event.xdata), float(event.ydata))
-        self._redraw()
+
+        self._anim_idx = min(self._anim_idx + 1, tx.size)
+        xs = tx[:self._anim_idx]
+        ys = ty[:self._anim_idx]
+
+        if self._traj_line is not None:
+            self._traj_line.set_data(xs, ys)
+        if self._traj_scatter is not None:
+            self._traj_scatter.set_offsets(np.c_[xs, ys])
+
+        self.draw_idle()
+        if self._anim_idx >= tx.size:
+            self.stop_animation()
+
+    # ---------------- 2D: contornos + trayectoria ----------------
+    def plot_2d_contour(self, X1: np.ndarray, X2: np.ndarray, Z: np.ndarray,
+                        path_x: Optional[np.ndarray] = None,
+                        path_y: Optional[np.ndarray] = None,
+                        title: str = "Gráfica 2D"):
+        self.stop_animation()
+        self.ax.clear()
+        self._style_axes()
+
+        self.ax.contour(X1, X2, Z, levels=20, colors="tab:blue", linewidths=1.0)
+
+        if path_x is not None and path_x.size and path_y is not None and path_y.size:
+            self.ax.plot(path_x, path_y, linestyle="--", color="tab:orange", linewidth=2)
+            self.ax.scatter(path_x, path_y, s=26, color="tab:red", zorder=3)
+
+        self.ax.set_title(title)
+        self.ax.set_xlabel("x1")
+        self.ax.set_ylabel("x2")
+        self.draw_idle()
+
+    def animate_2d_contour(self, X1: np.ndarray, X2: np.ndarray, Z: np.ndarray,
+                           path_x: np.ndarray, path_y: np.ndarray,
+                           title: str = "Gráfica 2D",
+                           interval_ms: int = 60):
+        self.stop_animation()
+        self.ax.clear()
+        self._style_axes()
+
+        self.ax.contour(X1, X2, Z, levels=20, colors="tab:blue", linewidths=1.0)
+
+        self._traj_line, = self.ax.plot([], [], linestyle="--", color="tab:orange", linewidth=2)
+        self._traj_scatter = self.ax.scatter([], [], s=26, color="tab:red", zorder=3)
+
+        self.ax.set_title(title)
+        self.ax.set_xlabel("x1")
+        self.ax.set_ylabel("x2")
+
+        self._anim_path = (np.asarray(path_x, dtype=float), np.asarray(path_y, dtype=float))
+        self._anim_idx = 0
+
+        self._anim_timer = QtCore.QTimer(self)
+        self._anim_timer.timeout.connect(self._step_anim_2d)  # type: ignore
+        self._anim_timer.start(max(10, int(interval_ms)))
+        self.draw_idle()
+
+    def _step_anim_2d(self):
+        if self._anim_path is None:
+            self.stop_animation()
+            return
+        px, py = self._anim_path
+        if px.size == 0:
+            self.stop_animation()
+            return
+        self._anim_idx = min(self._anim_idx + 1, px.size)
+        xs = px[:self._anim_idx]
+        ys = py[:self._anim_idx]
+
+        if self._traj_line is not None:
+            self._traj_line.set_data(xs, ys)
+        if self._traj_scatter is not None:
+            self._traj_scatter.set_offsets(np.c_[xs, ys])
+
+        self.draw_idle()
+        if self._anim_idx >= px.size:
+            self.stop_animation()

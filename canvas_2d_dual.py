@@ -1,0 +1,1 @@
+from canvas_2d import Function2DCanvas
