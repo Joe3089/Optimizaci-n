@@ -54,6 +54,19 @@ a = Analysis(
         'app.infrastructure.reporting.csv_export',
         'app.infrastructure.reporting.xlsx_export',
         'app.infrastructure.reporting.pdf_export',
+        # Motor de escalarización multiobjetivo (aditivo, Fase 6-8; aún no
+        # conectado a la UI, pero se incluye en el bundle para uso futuro)
+        'app.optimization.multiobjective.scalarization',
+        'app.optimization.multiobjective.scalarization.weighted_sum',
+        'app.optimization.multiobjective.scalarization.lexicographic',
+        'app.optimization.multiobjective.scalarization.goal_programming',
+        'app.optimization.multiobjective.scalarization.epsilon_constraint',
+        'app.optimization.multiobjective.scalarization.achievement_scalarizing',
+        'app.optimization.multiobjective.scalarization.chebyshev',
+        'app.optimization.multiobjective.scalarization.nbi',
+        'app.optimization.multiobjective.scalarization.normal_constraint',
+        'app.optimization.multiobjective.scalarization.adaptive_weighted_sum',
+        'app.optimization.multiobjective.scalarization.reference_point',
         # SSL / red
         'certifi',
         'ssl',
