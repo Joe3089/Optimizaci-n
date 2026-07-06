@@ -9,7 +9,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
-import csv, math, os, sys, tempfile, traceback
+import csv, importlib, math, os, sys, tempfile, traceback
 from typing import Any, Dict, List, Optional
 
 # ── PyInstaller: agregar _MEIPASS a sys.path ANTES de cualquier import dinámico ──
@@ -135,10 +135,10 @@ except Exception:
 Function2DCanvas = Rotating3DCanvas = None
 def _load_canvases():
     global Function2DCanvas, Rotating3DCanvas
-    for m in ("canvas_2d_estilo_fixed","canvas_2d"):
+    for m in ("app.ui.canvas_2d_estilo_fixed","app.ui.canvas_2d"):
         try: Function2DCanvas=__import__(m,fromlist=["Function2DCanvas"]).Function2DCanvas; break
         except: pass
-    for m in ("rotacion_3d_superficie","rotacion_3d"):
+    for m in ("app.ui.rotacion_3d_superficie","app.ui.rotacion_3d"):
         try: Rotating3DCanvas=__import__(m,fromlist=["Rotating3DCanvas"]).Rotating3DCanvas; break
         except: pass
 
@@ -157,7 +157,7 @@ def _add_to_path(path: str):
         sys.path.insert(0, path)
 
 def _try_import(name):
-    try:    return __import__(name)
+    try:    return importlib.import_module(name)
     except: return None
 
 def _init_modules(resource_path: str = ""):
@@ -183,8 +183,8 @@ def _init_modules(resource_path: str = ""):
         _add_to_path(d)
 
     # Importar módulos 1D clásicos
-    ls  = _try_import("line_search")
-    loc = _try_import("localsearch")
+    ls  = _try_import("app.optimization.line_search.nd_symbolic")
+    loc = _try_import("app.optimization.local_search")
 
     newton_armijo_fn = getattr(ls,  "newton_armijo",            None) if ls  else None
     newton_wolfe_fn  = getattr(ls,  "newton_wolfe_step",         None) if ls  else None
@@ -192,11 +192,11 @@ def _init_modules(resource_path: str = ""):
     local_fn         = getattr(loc, "local_neighborhood_search", None) if loc else None
 
     # Importar wrappers MD
-    _wrappers_mod   = _try_import("wrappers")
+    _wrappers_mod   = _try_import("app.optimization.constrained.penalty_barrier")
 
     # Importar heurísticos y metaheurísticos
-    _heuristics_mod = _try_import("heuristics")
-    _metaheur_mod   = _try_import("metaheuristics")
+    _heuristics_mod = _try_import("app.optimization.heuristics")
+    _metaheur_mod   = _try_import("app.optimization.metaheuristics")
 
     _modules_ready = True
     print(f"[módulos] line_search={'OK' if ls else 'NO'}  "
@@ -212,7 +212,7 @@ def _get_fc():
     global _func_compat
     if _func_compat is None:
         try:
-            import func_compat as _fc
+            import app.application.func_compat as _fc
             _func_compat = _fc
         except ImportError:
             pass
@@ -224,7 +224,7 @@ def _get_ai_panel_cls():
     global _ai_panel_cls
     if _ai_panel_cls is None:
         try:
-            from ai_assistant import AIAssistantPanel as _cls
+            from app.infrastructure.ai_assistant import AIAssistantPanel as _cls
             _ai_panel_cls = _cls
         except ImportError:
             pass
@@ -400,7 +400,7 @@ def _get_multiobj():
     global _multiobj_mod
     if _multiobj_mod is None:
         try:
-            import multiobj_schaffer as _mo
+            import app.optimization.multiobjective.schaffer as _mo
             _multiobj_mod = _mo
         except ImportError:
             pass
@@ -408,7 +408,9 @@ def _get_multiobj():
 
 # ── Ruta de imagen de fondo ───────────────────────────────────────────────────
 def _find_bg(extra: list = None) -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
+    # __file__ vive en app/ui/, la carpeta Menu/ sigue en la raíz del proyecto
+    # (o en _MEIPASS cuando corre congelado con PyInstaller).
+    here = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cands = (extra or []) + [
         os.path.join(here, "Menu", "Fondo", "Imgen de fondo.jpg"),
         os.path.join(here, "Menu", "Fondo", "Imgen de fondo.png"),

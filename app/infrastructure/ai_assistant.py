@@ -29,7 +29,8 @@ def _get_app_dir() -> str:
     """Devuelve la carpeta de la app: directorio del EXE (frozen) o del script."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    # __file__ vive en app/infrastructure/; la raíz del proyecto está dos niveles arriba.
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _APP_DIR  = _get_app_dir()
 _CFG_FILE = os.path.join(_APP_DIR, ".optimizer_config.json")

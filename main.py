@@ -5,8 +5,8 @@ import os
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 
-from splash_screen import SplashScreen
-from interfaz_qt import InterfazOptimizacion
+from app.ui.splash_screen import SplashScreen
+from app.ui.main_window import InterfazOptimizacion
 
 
 def resource_path(relative_path: str) -> str:

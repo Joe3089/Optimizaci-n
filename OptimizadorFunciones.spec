@@ -14,28 +14,15 @@ except Exception:
     _certifi_datas = []
 
 # ── Recursos del proyecto ─────────────────────────────────────────────────────
+# Los módulos propios ahora viven en el paquete app/ y se incluyen vía
+# hiddenimports (PyInstaller los compila al PYZ como cualquier import normal);
+# ya no hace falta copiarlos como datas planos.
 _project_datas_raw = [
     # Recursos gráficos
     ('Menu/fondo_optimizacion.png',   'Menu'),
     ('Menu/Fondo/Imgen de fondo.jpg', 'Menu/Fondo'),
     ('Menu/Fondo/Imgen de fondo.png', 'Menu/Fondo'),
     ('Menu/WindowsIcon-min.ico',      'Menu'),
-    # Módulos Python propios — copiados como .py al root del bundle
-    # para que __import__() dinámico los encuentre en _MEIPASS
-    ('localsearch.py',              '.'),
-    ('line_search.py',              '.'),
-    ('wrappers.py',                 '.'),
-    ('heuristics.py',               '.'),
-    ('metaheuristics.py',           '.'),
-    ('func_compat.py',              '.'),
-    ('canvas_2d.py',                '.'),
-    ('canvas_2d_estilo_fixed.py',   '.'),
-    ('canvas_2d_dual.py',           '.'),
-    ('rotacion_3d.py',              '.'),
-    ('rotacion_3d_superficie.py',   '.'),
-    ('ai_assistant.py',             '.'),
-    ('interfaz_qt.py',              '.'),
-    ('splash_screen.py',            '.'),
 ]
 _project_datas = [(s, d) for s, d in _project_datas_raw if os.path.exists(s)]
 
@@ -48,18 +35,20 @@ a = Analysis(
     datas=_certifi_datas + _project_datas,
     hiddenimports=[
         # Módulos propios (importados dinámicamente con __import__ / lazy)
-        'ai_assistant',
-        'interfaz_qt',
-        'line_search',
-        'localsearch',
-        'wrappers',
-        'heuristics',
-        'metaheuristics',
-        'func_compat',
-        'canvas_2d_estilo_fixed',
-        'canvas_2d',
-        'rotacion_3d_superficie',
-        'rotacion_3d',
+        'app.infrastructure.ai_assistant',
+        'app.ui.main_window',
+        'app.ui.splash_screen',
+        'app.optimization.line_search.nd_symbolic',
+        'app.optimization.local_search',
+        'app.optimization.constrained.penalty_barrier',
+        'app.optimization.heuristics',
+        'app.optimization.metaheuristics',
+        'app.application.func_compat',
+        'app.ui.canvas_2d_estilo_fixed',
+        'app.ui.canvas_2d',
+        'app.ui.rotacion_3d_superficie',
+        'app.ui.rotacion_3d',
+        'app.optimization.multiobjective.schaffer',
         # SSL / red
         'certifi',
         'ssl',
