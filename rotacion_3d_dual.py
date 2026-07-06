@@ -1,1 +1,0 @@
-from rotacion_3d import Rotating3DCanvas

@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0.."
 echo === Python activo === > resultado.txt
 python --version >> resultado.txt 2>&1
 where python >> resultado.txt 2>&1
