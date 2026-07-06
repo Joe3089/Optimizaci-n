@@ -39,6 +39,94 @@ def _get_multiobj():
             pass
     return _multiobj_mod
 
+from app.optimization.multiobjective.scalarization import get_strategy
+
+
+def _golden_min(func, lo, hi, tol: float = 1e-8, max_iter: int = 300) -> float:
+    """Búsqueda áurea de solo lectura: devuelve x* que minimiza `func` en
+    [lo,hi] (sin historial de iteraciones). Usada para precalcular puntos
+    ideales/tablas de pago que necesitan las técnicas del motor de
+    escalarización (ASF, Chebyshev, NBI, Normal Constraint, Goal
+    Programming)."""
+    p = (math.sqrt(5.0) - 1.0) / 2.0
+    a, b = float(lo), float(hi)
+    c = b - p * (b - a); d = a + p * (b - a)
+    fc, fd = func(c), func(d)
+    for _ in range(max_iter):
+        if b - a < tol:
+            break
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - p * (b - a); fc = func(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + p * (b - a); fd = func(d)
+    return (a + b) / 2.0
+
+
+def _append_tabla_ref(hist: list, tabla_ref: list) -> list:
+    """Adjunta la tabla de referencia α (igual que en MO — Sección Dorada)
+    al final de `hist`, como filas separadas."""
+    hist.append({"k": "──", "a_k": "── TABLA DE REFERENCIA α ──",
+                 "b_k": "", "c_k": "", "φ(c)": "", "d_k": "", "φ(d)": "",
+                 "x_k": "", "φ(x_k,α)": "", "b−a": "", "φ": "",
+                 "f₁(x_k)": "", "f₂(x_k)": "", "α": "", "converged": ""})
+    for row in tabla_ref:
+        hist.append({
+            "k": "ref", "a_k": row["α"], "b_k": row["f(x,α)"],
+            "c_k": "", "φ(c)": "", "d_k": "", "φ(d)": "",
+            "x_k": row["x*(α)"], "φ(x_k,α)": row["φ(x*,α)"],
+            "b−a": "", "φ": "",
+            "f₁(x_k)": row["f₁(x*)"], "f₂(x_k)": row["f₂(x*)"],
+            "α": row["α"], "converged": "",
+        })
+    return hist
+
+
+def _solve_scalarized(phi, lo, hi, a_val: float, f1_call, f2) -> list:
+    """Resuelve phi(x) con Sección Dorada y produce el mismo formato de
+    `hist` que MO — Sección Dorada, para que tabla/gráficas/export se
+    rendericen exactamente igual sin importar la técnica de escalarización
+    usada para construir `phi`."""
+    p_g = (math.sqrt(5.0) - 1.0) / 2.0
+    ag_, bg_ = float(lo), float(hi)
+    cg_ = bg_ - p_g * (bg_ - ag_); dg_ = ag_ + p_g * (bg_ - ag_)
+    phi_x = lambda xv: phi([xv])
+    fcg_, fdg_ = phi_x(cg_), phi_x(dg_)
+    hist: list = []
+    for k in range(300):
+        largo = bg_ - ag_; xm = (ag_ + bg_) / 2
+        try:
+            f1v = float(f1_call(xm)); f2v = float(f2(xm)); phiv = float(phi_x(xm))
+        except Exception:
+            f1v = f2v = phiv = float("nan")
+        hist.append({
+            "k": k, "a_k": round(ag_, 8), "b_k": round(bg_, 8),
+            "c_k": round(cg_, 8), "φ(c)": round(fcg_, 8),
+            "d_k": round(dg_, 8), "φ(d)": round(fdg_, 8),
+            "x_k": round(xm, 8), "φ(x_k,α)": round(phiv, 8),
+            "b−a": round(largo, 8), "φ": round(p_g, 6),
+            "f₁(x_k)": round(f1v, 6), "f₂(x_k)": round(f2v, 6),
+            "α": round(a_val, 4), "converged": largo < 1e-8,
+        })
+        if largo < 1e-8:
+            break
+        if fcg_ < fdg_:
+            bg_ = dg_; dg_ = cg_; fdg_ = fcg_
+            cg_ = bg_ - p_g * (bg_ - ag_); fcg_ = phi_x(cg_)
+        else:
+            ag_ = cg_; cg_ = dg_; fcg_ = fdg_
+            dg_ = ag_ + p_g * (bg_ - ag_); fdg_ = phi_x(dg_)
+    xopt = (ag_ + bg_) / 2
+    try:
+        hist[-1]["x_k"] = round(xopt, 8)
+        hist[-1]["φ(x_k,α)"] = round(phi_x(xopt), 8)
+        hist[-1]["f₁(x_k)"] = round(float(f1_call(xopt)), 6)
+        hist[-1]["f₂(x_k)"] = round(float(f2(xopt)), 6)
+    except Exception:
+        pass
+    return hist
+
 _line_search_nd = None
 _local_search   = None
 _heuristics_mod = None
@@ -502,6 +590,16 @@ def run_method(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
                 "φ(x*,α)": round(phi_r_val, 6),
             })
 
+        # ── Contexto compartido para las técnicas del motor de escalarización
+        # (app.optimization.multiobjective.scalarization) — precalculado una
+        # sola vez y reutilizado por las ramas nuevas de más abajo.
+        objectives = [lambda xv: float(f1_call(xv[0])), lambda xv: float(f2(xv[0]))]
+        x1_star = _golden_min(f1_call, lo, hi)
+        x2_star = _golden_min(f2, lo, hi)
+        ideal_point   = [float(f1_call(x1_star)), float(f2(x2_star))]
+        payoff_table  = [[float(f1_call(x1_star)), float(f2(x1_star))],
+                         [float(f1_call(x2_star)), float(f2(x2_star))]]
+
         # ═══════════════════════════════════════════════════════════════════
         # MO — BISECCIÓN
         # ═══════════════════════════════════════════════════════════════════
@@ -668,6 +766,66 @@ def run_method(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
             }
             return rows_j, mo_context
 
+        # ═══════════════════════════════════════════════════════════════════
+        # Motor de escalarización (app.optimization.multiobjective.scalarization,
+        # Fase 6-8) — 9 técnicas nuevas + activación de "Escalarización (Suma
+        # Ponderada)" (ya existía en el combo, sin rama de despacho hasta ahora).
+        # Todas resuelven phi(x) con la misma Sección Dorada (_solve_scalarized)
+        # y devuelven el mismo formato de hist/mo_context que las técnicas de
+        # arriba, para que tabla/gráficas/export se comporten igual.
+        # ═══════════════════════════════════════════════════════════════════
+        _SCALARIZATION_METHODS = {
+            "Escalarización (Suma Ponderada)": "weighted_sum",
+            "MO — Lexicográfico":              "lexicographic",
+            "MO — Goal Programming":           "goal_programming",
+            "MO — ε-Constraint":               "epsilon_constraint",
+            "MO — ASF (Logro)":                "achievement_scalarizing",
+            "MO — Chebyshev":                  "chebyshev",
+            "MO — NBI":                        "nbi",
+            "MO — Restricción Normal":         "normal_constraint",
+            "MO — Peso Adaptativo":            "adaptive_weighted_sum",
+            "MO — Punto de Referencia":        "reference_point",
+        }
+        if metodo in _SCALARIZATION_METHODS:
+            strategy_name = _SCALARIZATION_METHODS[metodo]
+            weights = [a_val, 1.0 - a_val]
+
+            if strategy_name == "lexicographic":
+                kwargs = {"priority": [0, 1]}
+            elif strategy_name == "goal_programming":
+                kwargs = {"goals": ideal_point, "weights": weights}
+            elif strategy_name == "epsilon_constraint":
+                # Más peso en α (más importancia a f1) → más holgura permitida
+                # en la restricción sobre f2, y viceversa.
+                f2_min, f2_max = payoff_table[1][1], max(f2(lo), f2(hi))
+                epsilon = f2_min + a_val * max(f2_max - f2_min, 1e-12)
+                kwargs = {"primary_index": 0, "epsilons": [epsilon]}
+            elif strategy_name in ("achievement_scalarizing", "chebyshev"):
+                key = "reference_point" if strategy_name == "achievement_scalarizing" else "ideal_point"
+                kwargs = {key: ideal_point, "weights": weights}
+            elif strategy_name in ("nbi", "normal_constraint"):
+                kwargs = {"payoff_table": payoff_table, "beta": weights}
+                if strategy_name == "normal_constraint":
+                    kwargs["representative_index"] = 0
+            elif strategy_name == "adaptive_weighted_sum":
+                kwargs = {"weights": weights, "neighbor_points": None, "curvature_penalty": 0.0}
+            elif strategy_name == "reference_point":
+                kwargs = {"reference_point": [float(f1_call(x0_start)), float(f2(x0_start))],
+                          "weights": weights}
+            else:
+                kwargs = {"weights": weights}
+
+            result = get_strategy(strategy_name).scalarize(objectives, **kwargs)
+            hist = _solve_scalarized(result.scalarized, lo, hi, a_val, f1_call, f2)
+            _append_tabla_ref(hist, tabla_ref)
+            mo_context = {
+                "tabla_ref": tabla_ref,
+                "hist_iters": [r for r in hist if r.get("k") not in ("──", "ref")],
+                "alpha": a_val, "x_c": x_c,
+                "f1_call": f1_call, "f2_call": f2, "var1": var1,
+            }
+            return hist, mo_context
+
     return [], None
 
 
@@ -680,6 +838,15 @@ _METHODS_MULTIOBJ = frozenset({
     "MO — Sección Dorada",
     "MO — Frente de Pareto",
     "MO — Análisis Jacobiano",
+    "MO — Lexicográfico",
+    "MO — Goal Programming",
+    "MO — ε-Constraint",
+    "MO — ASF (Logro)",
+    "MO — Chebyshev",
+    "MO — NBI",
+    "MO — Restricción Normal",
+    "MO — Peso Adaptativo",
+    "MO — Punto de Referencia",
 })
 
 def _is_multiobj(metodo: str) -> bool:

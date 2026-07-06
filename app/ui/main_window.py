@@ -199,6 +199,16 @@ METHODS_MULTIOBJ = [
     "MO — Sección Dorada",
     "MO — Frente de Pareto",
     "MO — Análisis Jacobiano",
+    # Motor de escalarización (Fase 6-8, app.optimization.multiobjective.scalarization)
+    "MO — Lexicográfico",
+    "MO — Goal Programming",
+    "MO — ε-Constraint",
+    "MO — ASF (Logro)",
+    "MO — Chebyshev",
+    "MO — NBI",
+    "MO — Restricción Normal",
+    "MO — Peso Adaptativo",
+    "MO — Punto de Referencia",
 ]
 
 # Métodos de búsqueda lineal que aceptan funciones multivariable
@@ -245,6 +255,15 @@ GROUPED_METHODS = [
         "MO — Sección Dorada",
         "MO — Frente de Pareto",
         "MO — Análisis Jacobiano",
+        "MO — Lexicográfico",
+        "MO — Goal Programming",
+        "MO — ε-Constraint",
+        "MO — ASF (Logro)",
+        "MO — Chebyshev",
+        "MO — NBI",
+        "MO — Restricción Normal",
+        "MO — Peso Adaptativo",
+        "MO — Punto de Referencia",
     ]),
 ]
 
@@ -330,6 +349,16 @@ def _needs_x0(m):     return m in (METHODS_LS + METHODS_ND)
 def _needs_alpha(m):  return m in (
     "MO — Bisección",
     "MO — Sección Dorada",
+    "Escalarización (Suma Ponderada)",
+    "MO — Goal Programming",
+    "MO — ε-Constraint",
+    "MO — ASF (Logro)",
+    "MO — Chebyshev",
+    "MO — NBI",
+    "MO — Restricción Normal",
+    "MO — Peso Adaptativo",
+    "MO — Punto de Referencia",
+    # "MO — Lexicográfico" queda fuera: usa prioridad fija f1>f2, α no aplica.
 )
 # Ningún método MO tiene función predefinida — el usuario siempre ingresa f(x)
 _MO_SCHAFFER_FIXED: set = set()   # vacío: todos requieren función del usuario
