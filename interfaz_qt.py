@@ -12,6 +12,13 @@ from __future__ import annotations
 import csv, math, os, sys, tempfile, traceback
 from typing import Any, Dict, List, Optional
 
+# ── PyInstaller: agregar _MEIPASS a sys.path ANTES de cualquier import dinámico ──
+# Sin esto, __import__("localsearch") falla en el EXE aunque el .py esté en datas.
+if getattr(sys, 'frozen', False):
+    _meipass = getattr(sys, '_MEIPASS', '')
+    if _meipass and _meipass not in sys.path:
+        sys.path.insert(0, _meipass)
+
 # ── Qt ───────────────────────────────────────────────────────────────────────
 _QT = None
 try:
@@ -50,6 +57,7 @@ QFrame = QtWidgets.QFrame;        QTbl  = QtWidgets.QTableWidget
 QTI    = QtWidgets.QTableWidgetItem; QHV = QtWidgets.QHeaderView
 QDSpin = QtWidgets.QDoubleSpinBox; QMsgBox = QtWidgets.QMessageBox
 QSplit = QtWidgets.QSplitter;     QFD  = QtWidgets.QFileDialog
+QScroll = QtWidgets.QScrollArea
 QMenu  = QtWidgets.QMenu
 try:    QAction = QtWidgets.QAction
 except: QAction = QtGui.QAction                           # type: ignore
@@ -230,6 +238,7 @@ METHODS_MD = [
     "MD: Pes. (Nelder-Mead)",    "MD: Sum. (BFGS)",
 ]
 METHODS_HEU = [
+    "Sección Dorada",
     "Sección Áurea",
     "Goldstein",
     "Newton-Raphson",
@@ -240,6 +249,18 @@ METHODS_META = [
     "PSO: Enjambre",
     "GA: Algoritmo Genético",
 ]
+# ── Multiobjetivo ─────────────────────────────────────────────────────────────
+# El usuario ingresa f(x) mono-objetivo → el sistema la convierte en MO
+# aplicando Escalarización con α → luego resuelve con el algoritmo elegido.
+# La tabla de α es un RESULTADO (referencia), no un método seleccionable.
+METHODS_MULTIOBJ = [
+    "Escalarización (Suma Ponderada)", # ← ESENCIAL: convierte F(x)=[f1,f2] en φ(x,α)
+    "MO — Bisección",
+    "MO — Sección Dorada",
+    "MO — Frente de Pareto",
+    "MO — Análisis Jacobiano",
+]
+
 # Métodos de búsqueda lineal que aceptan funciones multivariable
 METHODS_LS   = ["Armijo", "Wolfe"]
 # Métodos que usan vars+x0 pero no restricción
@@ -247,15 +268,143 @@ METHODS_ND   = METHODS_HEU[1:] + METHODS_META   # Goldstein, NR, GC + meta
 # Métodos que usan bounds [lo,hi] + vars (no necesitan x0 manual)
 METHODS_BOUNDS = ["PSO: Enjambre", "GA: Algoritmo Genético"]
 
-ALL_METHODS = METHODS_1D + METHODS_MD + METHODS_HEU + METHODS_META
+ALL_METHODS = METHODS_1D + METHODS_MD + METHODS_HEU + METHODS_META + METHODS_MULTIOBJ
 
-def _is_md(m):     return m in METHODS_MD
-def _is_ls(m):     return m in METHODS_LS
-def _is_fib(m):    return m == "Fibonacci"
-def _is_heu(m):    return m in METHODS_HEU
-def _is_meta(m):   return m in METHODS_META
-def _is_1d_only(m): return m in ("Búsqueda Local", "Fibonacci", "Sección Áurea")
-def _needs_x0(m):  return m in (METHODS_LS + METHODS_ND)
+# ── Agrupación por categoría para el ComboBox ─────────────────────────────────
+# Orden y clasificación basados en la naturaleza del método (1D → ND → MD → Meta → MO)
+GROUPED_METHODS = [
+    ("Unidimensionales (1D)", [
+        "Búsqueda Local",
+        "Fibonacci",
+        "Sección Áurea",
+        "Sección Dorada",
+        "Goldstein",
+        "Armijo",
+        "Wolfe",
+        "Newton-Raphson",
+    ]),
+    ("Multidimensionales (ND)", [
+        "Grad. Conjugado",
+    ]),
+    ("Restringidos (MD)", [
+        "MD: Penalización (Newton)",
+        "MD: Barreras (Newton)",
+        "MD: Pen. (BFGS)",
+        "MD: Pes. (BFGS)",
+        "MD: Pes. (Nelder-Mead)",
+        "MD: Sum. (BFGS)",
+    ]),
+    ("Global / Metaheurística", [
+        "SA: Recocido Simulado",
+        "PSO: Enjambre",
+        "GA: Algoritmo Genético",
+    ]),
+    ("Multiobjetivo (MO)", [
+        "Escalarización (Suma Ponderada)",   # ← convierte F(x)=[f1,f2] en φ(x,α)
+        "MO — Bisección",
+        "MO — Sección Dorada",
+        "MO — Frente de Pareto",
+        "MO — Análisis Jacobiano",
+    ]),
+]
+
+# Rol interno para marcar items de encabezado de categoría en el ComboBox
+_CMB_HEADER_ROLE = (Qt.ItemDataRole.UserRole + 10
+                    if _QT == "PyQt6" else Qt.UserRole + 10)
+
+
+# ── Delegado para encabezados de grupo en el ComboBox ────────────────────────
+class _GroupHeaderDelegate(QtWidgets.QStyledItemDelegate):
+    """Pinta los encabezados de categoría con fondo y tipografía distintos;
+    los ítems normales se delegan al comportamiento estándar."""
+
+    _BG   = QColor("#0b1628")
+    _FG   = QColor("#5ba3ff")
+    _LINE = QColor("#1e3a6e")
+
+    def paint(self, painter, option, index):
+        if index.data(_CMB_HEADER_ROLE):
+            painter.save()
+            r = option.rect
+            painter.fillRect(r, self._BG)
+            # línea divisoria superior
+            painter.setPen(QPen(self._LINE, 1))
+            painter.drawLine(r.left(), r.top(), r.right(), r.top())
+            # texto
+            painter.setPen(self._FG)
+            font = QFont(option.font)
+            font.setBold(True)
+            font.setPointSizeF(max(7.5, font.pointSizeF() - 0.5))
+            painter.setFont(font)
+            text_r = r.adjusted(10, 0, -6, 0)
+            flags = (_AL("AlignVCenter", "AlignLeft")
+                     if _QT == "PyQt6" else _AL("AlignVCenter", "AlignLeft"))
+            painter.drawText(text_r, flags, index.data())
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
+
+    def sizeHint(self, option, index):
+        sh = super().sizeHint(option, index)
+        if index.data(_CMB_HEADER_ROLE):
+            return sh.__class__(sh.width(), max(sh.height(), 24))
+        return sh
+
+
+def _populate_grouped_combo(cmb: "QCmb") -> None:
+    """Pobla el QComboBox con métodos agrupados por categoría.
+    Los encabezados son visualmente distintos y no seleccionables."""
+    cmb.setItemDelegate(_GroupHeaderDelegate(cmb))
+    cmb.addItem("")                    # ítem vacío inicial (placeholder)
+
+    for category, methods in GROUPED_METHODS:
+        # ── Encabezado de categoría ──────────────────────────────────────────
+        cmb.addItem(category)
+        hdr_idx = cmb.count() - 1
+        hdr_item = cmb.model().item(hdr_idx)
+        hdr_item.setData(True, _CMB_HEADER_ROLE)
+        if _QT == "PyQt6":
+            hdr_item.setFlags(
+                hdr_item.flags()
+                & ~Qt.ItemFlag.ItemIsSelectable
+                & ~Qt.ItemFlag.ItemIsEnabled)
+        else:
+            hdr_item.setFlags(
+                hdr_item.flags()
+                & ~Qt.ItemIsSelectable
+                & ~Qt.ItemIsEnabled)
+
+        # ── Métodos de la categoría ──────────────────────────────────────────
+        for method in methods:
+            cmb.addItem(method)
+
+def _is_md(m):        return m in METHODS_MD
+def _is_ls(m):        return m in METHODS_LS
+def _is_fib(m):       return m == "Fibonacci"
+def _is_heu(m):       return m in METHODS_HEU
+def _is_meta(m):      return m in METHODS_META
+def _is_multiobj(m):  return m in METHODS_MULTIOBJ
+def _is_1d_only(m):   return m in ("Búsqueda Local", "Fibonacci", "Sección Áurea",
+                                     "Bisección", "Sección Dorada")
+def _needs_x0(m):     return m in (METHODS_LS + METHODS_ND)
+def _needs_alpha(m):  return m in (
+    "MO — Bisección",
+    "MO — Sección Dorada",
+)
+# Ningún método MO tiene función predefinida — el usuario siempre ingresa f(x)
+_MO_SCHAFFER_FIXED: set = set()   # vacío: todos requieren función del usuario
+
+# ── Módulo multiobjetivo (carga lazy) ─────────────────────────────────────────
+_multiobj_mod = None
+def _get_multiobj():
+    global _multiobj_mod
+    if _multiobj_mod is None:
+        try:
+            import multiobj_schaffer as _mo
+            _multiobj_mod = _mo
+        except ImportError:
+            pass
+    return _multiobj_mod
 
 # ── Ruta de imagen de fondo ───────────────────────────────────────────────────
 def _find_bg(extra: list = None) -> str:
@@ -275,6 +424,384 @@ def _find_bg(extra: list = None) -> str:
         "/mnt/user-data/outputs/Imgen_de_fondo.jpg",
     ]
     return next((p for p in cands if p and os.path.exists(p)), "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LegendResizeOverlay — handles de redimensionado + mover leyenda
+# ══════════════════════════════════════════════════════════════════════════════
+class LegendResizeOverlay(QW):
+    """
+    Comportamiento de interacción con la leyenda:
+
+    CLIC IZQUIERDO en el centro de la leyenda
+        → Selecciona la leyenda y muestra los 8 handles estilo Excel.
+        → Al arrastrar un handle se expande o contrae el recuadro.
+        → Clic fuera de la leyenda → deselecciona y oculta los handles.
+
+    CLIC DERECHO sobre la leyenda
+        → Abre un pequeño menú contextual con la opción "Mover leyenda".
+        → Al seleccionarla la leyenda queda "pegada" al cursor (modo mover).
+        → La leyenda sigue al cursor en tiempo real.
+        → Dos clics izquierdos consecutivos sueltan la leyenda en esa posición.
+    """
+    HANDLE = 8   # tamaño del cuadradito en px
+
+    def __init__(self, canvas, ax, parent=None):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.ax     = ax
+
+        # ── estado resize ────────────────────────────────────────────────────
+        self._active     = False   # handles visibles
+        self._dragging   = False
+        self._drag_hdl   = None
+        self._drag_start = None
+        self._init_fs    = 10.0
+        self._handles    = []
+
+        # ── estado mover ─────────────────────────────────────────────────────
+        self._move_mode        = False
+        self._move_click_count = 0   # 2 clics izq para soltar
+        self._motion_cid       = None
+        # offset en fracción de ejes entre cursor y esquina inf-izq de la leyenda
+        self._move_offset_ax   = (0.0, 0.0)
+
+        self.setAttribute(_WA("WA_TranslucentBackground"), True)
+        self.setMouseTracking(True)
+        self.resize(canvas.size())
+        canvas.installEventFilter(self)
+
+        # Eventos matplotlib
+        canvas.fig.canvas.mpl_connect("button_press_event",   self._on_mpl_click)
+        canvas.fig.canvas.mpl_connect("motion_notify_event",  self._on_mpl_motion)
+
+        self.raise_()
+        self.hide()   # inicia oculto
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Helpers
+    # ══════════════════════════════════════════════════════════════════════════
+    def _in_legend(self, event):
+        """True si el evento matplotlib cae dentro del bbox de la leyenda."""
+        leg = self.ax.get_legend()
+        if leg is None or not leg.get_visible():
+            return False
+        try:
+            renderer = self.canvas.fig.canvas.get_renderer()
+            bb = leg.get_window_extent(renderer)
+            return bb.contains(event.x, event.y)
+        except Exception:
+            return False
+
+    def _display_to_axes(self, x, y):
+        """Convierte coordenadas display (mpl) a fracción de ejes."""
+        try:
+            return self.ax.transAxes.inverted().transform((x, y))
+        except Exception:
+            return (0.5, 0.5)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Eventos matplotlib
+    # ══════════════════════════════════════════════════════════════════════════
+    def _on_mpl_click(self, event):
+        # ── En modo mover: contar clics izquierdos para soltar ────────────────
+        if self._move_mode:
+            if event.button == 1:
+                self._move_click_count += 1
+                if self._move_click_count >= 2:
+                    self._stop_move_mode()
+            return
+
+        # ── Clic derecho sobre la leyenda → menú contextual ──────────────────
+        if event.button == 3 and self._in_legend(event):
+            self._show_legend_menu(event)
+            return
+
+        # ── Clic izquierdo → activar/desactivar handles ───────────────────────
+        if event.button == 1:
+            if self._in_legend(event):
+                self._activate()
+            else:
+                self._deactivate()
+
+    def _on_mpl_motion(self, event):
+        """En modo mover: la leyenda sigue al cursor en tiempo real."""
+        if not self._move_mode:
+            return
+        try:
+            ax_pos = self._display_to_axes(event.x, event.y)
+            ox, oy = self._move_offset_ax
+            new_x = ax_pos[0] + ox
+            new_y = ax_pos[1] + oy
+            leg = self.ax.get_legend()
+            if leg:
+                leg.set_bbox_to_anchor((new_x, new_y), transform=self.ax.transAxes)
+                self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Menú contextual de la leyenda (clic derecho)
+    # ══════════════════════════════════════════════════════════════════════════
+    def _show_legend_menu(self, event):
+        menu = QMenu(self.canvas)
+        menu.setStyleSheet(
+            "QMenu{background:#141e36;color:#d8e8f8;border:1px solid #2a3e6e;"
+            "border-radius:6px;padding:4px;font-size:13px;}"
+            "QMenu::item{padding:6px 22px;border-radius:4px;}"
+            "QMenu::item:selected{background:#1a50c0;}"
+        )
+        act_move = menu.addAction("✋  Mover leyenda")
+        act_move.setToolTip("La leyenda seguirá al cursor. Da 2 clics para soltarla.")
+
+        try:
+            gpos = self.canvas.mapToGlobal(
+                QtCore.QPoint(int(event.x), int(self.canvas.height() - event.y)))
+        except Exception:
+            gpos = QtGui.QCursor.pos()
+
+        chosen = menu.exec(gpos) if _QT == "PyQt6" else menu.exec_(gpos)
+        if chosen == act_move:
+            self._start_move_mode(event)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Modo mover
+    # ══════════════════════════════════════════════════════════════════════════
+    def _start_move_mode(self, event):
+        """Activa el modo mover: la leyenda sigue al cursor."""
+        self._deactivate()          # ocultar handles si estaban visibles
+        self._move_mode        = True
+        self._move_click_count = 0
+
+        # Calcular offset para que la leyenda no "salte" al activar el modo
+        try:
+            leg = self.ax.get_legend()
+            renderer = self.canvas.fig.canvas.get_renderer()
+            bb = leg.get_window_extent(renderer)
+            # esquina inf-izq de la leyenda en coords de ejes
+            leg_ax = self._display_to_axes(bb.x0, bb.y0)
+            # cursor en coords de ejes
+            cur_ax = self._display_to_axes(event.x, event.y)
+            self._move_offset_ax = (leg_ax[0] - cur_ax[0],
+                                    leg_ax[1] - cur_ax[1])
+            # Desactivar el draggable nativo para evitar conflictos
+            leg.set_draggable(False)
+        except Exception:
+            self._move_offset_ax = (0.0, 0.0)
+
+        # Cursor SizeAll
+        cur = (Qt.CursorShape.SizeAllCursor if _QT == "PyQt6"
+               else Qt.SizeAllCursor)
+        self.canvas.setCursor(QtGui.QCursor(cur))
+
+        # Mostrar tooltip de instrucción
+        try:
+            parent_win = self.canvas.parent()
+            while parent_win and not hasattr(parent_win, "lbl_st"):
+                parent_win = parent_win.parent()
+            if parent_win:
+                parent_win.lbl_st.setText(
+                    "✋ Modo mover activo — mueve el cursor y da 2 clics para soltar la leyenda.")
+        except Exception:
+            pass
+
+    def _stop_move_mode(self):
+        """Desactiva el modo mover y restaura el estado normal."""
+        self._move_mode        = False
+        self._move_click_count = 0
+        self.canvas.unsetCursor()
+        # Restaurar draggable
+        try:
+            leg = self.ax.get_legend()
+            if leg:
+                leg.set_draggable(True, use_blit=False)
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+        # Limpiar tooltip
+        try:
+            parent_win = self.canvas.parent()
+            while parent_win and not hasattr(parent_win, "lbl_st"):
+                parent_win = parent_win.parent()
+            if parent_win:
+                parent_win.lbl_st.setText(
+                    "✅ Leyenda colocada. Clic derecho sobre ella para volver a moverla.")
+        except Exception:
+            pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Activación / desactivación de handles
+    # ══════════════════════════════════════════════════════════════════════════
+    def _activate(self):
+        if not self._active:
+            self._active = True
+            self.raise_()
+            self.show()
+        self.update()
+
+    def _deactivate(self):
+        if self._active:
+            self._active   = False
+            self._dragging = False
+            self.hide()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Geometría de handles
+    # ══════════════════════════════════════════════════════════════════════════
+    def _leg_bbox(self):
+        """QRect de la leyenda en coordenadas Qt (y invertida)."""
+        leg = self.ax.get_legend()
+        if leg is None or not leg.get_visible():
+            return None
+        try:
+            renderer = self.canvas.fig.canvas.get_renderer()
+            bb = leg.get_window_extent(renderer)
+            h  = self.canvas.height()
+            return QtCore.QRect(int(bb.x0), int(h - bb.y1),
+                                int(bb.x1 - bb.x0), int(bb.y1 - bb.y0))
+        except Exception:
+            return None
+
+    def _build_handles(self, rect):
+        hs = self.HANDLE
+        h2 = hs // 2
+        x0, y0 = rect.x(), rect.y()
+        xm, ym = x0 + rect.width() // 2, y0 + rect.height() // 2
+        x1, y1 = x0 + rect.width(),      y0 + rect.height()
+
+        def _r(cx, cy):
+            return QtCore.QRect(cx - h2, cy - h2, hs, hs)
+
+        self._handles = [
+            (0, 0, _r(x0, y0)), (0, 1, _r(xm, y0)), (0, 2, _r(x1, y0)),
+            (1, 0, _r(x0, ym)),                       (1, 2, _r(x1, ym)),
+            (2, 0, _r(x0, y1)), (2, 1, _r(xm, y1)), (2, 2, _r(x1, y1)),
+        ]
+
+    def _handle_at(self, pos):
+        for row, col, rect in self._handles:
+            if rect.contains(pos):
+                return row, col
+        return None
+
+    @staticmethod
+    def _cursor_for_handle(row, col):
+        mapping = {
+            (0, 0): "SizeFDiagCursor", (0, 2): "SizeBDiagCursor",
+            (2, 0): "SizeBDiagCursor", (2, 2): "SizeFDiagCursor",
+            (0, 1): "SizeVerCursor",   (2, 1): "SizeVerCursor",
+            (1, 0): "SizeHorCursor",   (1, 2): "SizeHorCursor",
+        }
+        name = mapping.get((row, col), "ArrowCursor")
+        return (QtGui.QCursor(getattr(Qt.CursorShape, name)) if _QT == "PyQt6"
+                else QtGui.QCursor(getattr(Qt, name)))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Paint
+    # ══════════════════════════════════════════════════════════════════════════
+    def paintEvent(self, event):
+        if not self._active:
+            return
+        rect = self._leg_bbox()
+        if rect is None:
+            return
+        self._build_handles(rect)
+
+        p    = QPainter(self)
+        hint = QPainter.RenderHint.Antialiasing if _QT == "PyQt6" else QPainter.Antialiasing
+        p.setRenderHint(hint)
+
+        # borde de selección punteado azul
+        dash     = Qt.PenStyle.DashLine  if _QT == "PyQt6" else Qt.DashLine
+        no_brush = Qt.BrushStyle.NoBrush if _QT == "PyQt6" else Qt.NoBrush
+        p.setPen(QPen(QColor(80, 160, 255, 210), 1.5, dash))
+        p.setBrush(QBrush(no_brush))
+        p.drawRect(rect)
+
+        # handles: cuadrado blanco con borde azul
+        for _, _, hrect in self._handles:
+            p.setPen(QPen(QColor(60, 130, 240), 1.2))
+            p.setBrush(QBrush(QColor(255, 255, 255, 230)))
+            p.drawRect(hrect)
+
+        p.end()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Eventos Qt del overlay (redimensionado con handles)
+    # ══════════════════════════════════════════════════════════════════════════
+    def mousePressEvent(self, event):
+        left = Qt.MouseButton.LeftButton if _QT == "PyQt6" else Qt.LeftButton
+        if event.button() == left:
+            hdl = self._handle_at(event.pos())
+            if hdl:
+                self._dragging   = True
+                self._drag_hdl   = hdl
+                self._drag_start = event.pos()
+                leg = self.ax.get_legend()
+                self._init_fs = (leg.get_texts()[0].get_fontsize()
+                                 if leg and leg.get_texts() else 10.0)
+                event.accept()
+                return
+            # Clic en el overlay fuera de un handle → deseleccionar
+            self._deactivate()
+        event.ignore()
+
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        if self._dragging and self._drag_start is not None:
+            delta = pos - self._drag_start
+            row, col = self._drag_hdl
+            if   col == 2: d =  delta.x()
+            elif col == 0: d = -delta.x()
+            elif row == 2: d =  delta.y()
+            elif row == 0: d = -delta.y()
+            else:          d = (abs(delta.x()) + abs(delta.y())) * 0.5
+
+            new_fs = max(6.0, min(22.0, self._init_fs + d * 0.07))
+            leg = self.ax.get_legend()
+            if leg:
+                for txt in leg.get_texts():
+                    txt.set_fontsize(new_fs)
+                try:
+                    leg.prop.set_size(new_fs)
+                except Exception:
+                    pass
+                self.canvas.draw_idle()
+            self.update()
+            event.accept()
+        else:
+            hdl = self._handle_at(pos)
+            if hdl:
+                self.setCursor(self._cursor_for_handle(*hdl))
+                event.accept()
+            else:
+                self.unsetCursor()
+                event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging   = False
+            self._drag_hdl   = None
+            self._drag_start = None
+            event.accept()
+        else:
+            event.ignore()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Resize del canvas
+    # ══════════════════════════════════════════════════════════════════════════
+    def eventFilter(self, obj, event):
+        resize_t = QtCore.QEvent.Type.Resize if _QT == "PyQt6" else QtCore.QEvent.Resize
+        if obj is self.canvas and event.type() == resize_t:
+            self.resize(self.canvas.size())
+            if self._active:
+                self.update()
+        return False
+
+    def refresh(self):
+        """Llamar tras draw_idle para repintar los handles si están activos."""
+        if self._active:
+            self.update()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -346,6 +873,10 @@ class LeftPanel(BgPanel):
     def paintEvent(self, event):
         # 1) Fondo (heredado)
         super().paintEvent(event)
+        # Capa semiopaca sobre el fondo para mejorar legibilidad de los controles
+        p0 = QPainter(self)
+        p0.fillRect(0, 0, self.width(), self.height(), QColor(4, 10, 32, 175))
+        p0.end()
 
         # 2) Cubo wireframe isométrico
         p = QPainter(self)
@@ -623,6 +1154,11 @@ class InterfazOptimizacion(QMW):
         self._click_cid = None   # matplotlib event connection id
         # Historial de sesión: lista de dicts con datos de cada ejecución
         self._session: List[Dict[str,Any]] = []
+        # Métodos ejecutados en la sesión actual (para botón "Comparar" del AI)
+        self._session_methods: List[str] = []
+        # Historial persistente de funciones y métodos usados (no se borra con Limpiar)
+        self._history_log: List[Dict[str,Any]] = []
+
 
         # ── Ventana ───────────────────────────────────────────────────────────
         self.setWindowTitle("Optimizador de Funciones")
@@ -633,11 +1169,36 @@ class InterfazOptimizacion(QMW):
         root = QHBox(central)
         root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
-        # Panel izquierdo
+        # Panel izquierdo con scroll (los campos MD no se cortan)
         self.left = LeftPanel(bg)
         self.left.setFixedWidth(375)
-        self._LL = QVBox(self.left)
+
+        self._left_inner = QW()
+        self._left_inner.setStyleSheet("background: transparent;")
+        self._LL = QVBox(self._left_inner)
         self._LL.setContentsMargins(22,14,22,14); self._LL.setSpacing(7)
+
+        self._left_scroll = QScroll()
+        self._left_scroll.setWidget(self._left_inner)
+        self._left_scroll.setWidgetResizable(True)
+        self._left_scroll.setFrameShape(QFrame.Shape.NoFrame if _QT=="PyQt6" else QFrame.NoFrame)
+        self._left_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff if _QT=="PyQt6"
+            else QtCore.Qt.ScrollBarAlwaysOff)
+        self._left_scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded if _QT=="PyQt6"
+            else QtCore.Qt.ScrollBarAsNeeded)
+        self._left_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: rgba(10,20,60,120); width: 6px;"
+            "  border-radius: 3px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: rgba(60,120,220,180);"
+            "  border-radius: 3px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
+
+        _left_outer_layout = QVBox(self.left)
+        _left_outer_layout.setContentsMargins(0,0,0,0)
+        _left_outer_layout.addWidget(self._left_scroll)
 
         # Separador vertical
         div = QFrame()
@@ -682,8 +1243,7 @@ class InterfazOptimizacion(QMW):
         # 1 — Método (primero)
         L.addWidget(QLbl("Método:"))
         self.cmb = QCmb()
-        self.cmb.addItem("")
-        self.cmb.addItems(ALL_METHODS)
+        _populate_grouped_combo(self.cmb)
         L.addWidget(self.cmb); L.addSpacing(3)
 
         # 2 — Función
@@ -711,7 +1271,30 @@ class InterfazOptimizacion(QMW):
         self.edt_tol.setText("0.1"); rt.addWidget(self.edt_tol)
         L.addWidget(self.row_tol); self.row_tol.setVisible(False)
 
-        # 5 — Sección MD / Variables (visible para MD, Armijo y Wolfe)
+        # 4b — Alpha α (solo métodos multiobjetivo con escalarización)
+        L.addSpacing(3)
+        self.row_alpha = QW(); ra = QHBox(self.row_alpha)
+        ra.setContentsMargins(0,0,0,0); ra.setSpacing(6)
+        ra.addWidget(QLbl("Peso α ∈ [0,1]:"))
+        self.edt_alpha = QDSpin()
+        self.edt_alpha.setDecimals(4); self.edt_alpha.setRange(0.0, 1.0)
+        self.edt_alpha.setSingleStep(0.05); self.edt_alpha.setValue(0.5)
+        self.edt_alpha.setToolTip(
+            "α controla el peso de cada objetivo.\n"
+            "α=0 → minimiza solo f2=(x-2)²\n"
+            "α=1 → minimiza solo f1=x²\n"
+            "α=0.5 → balance igual entre ambos objetivos")
+        ra.addWidget(self.edt_alpha)
+        L.addWidget(self.row_alpha); self.row_alpha.setVisible(False)
+
+        # 4c — Punto inicial x0 para métodos MO generales (solo 1 valor)
+        self.row_x0_mo = QW(); rx0 = QHBox(self.row_x0_mo)
+        rx0.setContentsMargins(0,0,0,0); rx0.setSpacing(6)
+        rx0.addWidget(QLbl("x₀ inicial:"))
+        self.edt_x0_mo = SpanishLineEdit(); self.edt_x0_mo.setPlaceholderText("Ej: 1.0")
+        self.edt_x0_mo.setText("1.0")
+        rx0.addWidget(self.edt_x0_mo)
+        L.addWidget(self.row_x0_mo); self.row_x0_mo.setVisible(False)
         L.addSpacing(3)
         self.md_sec = QFrame(); self.md_sec.setObjectName("mdSec")
         ml = QVBox(self.md_sec); ml.setContentsMargins(8,6,8,6); ml.setSpacing(5)
@@ -728,17 +1311,55 @@ class InterfazOptimizacion(QMW):
         ml.addWidget(self.edt_x0)
         L.addWidget(self.md_sec); self.md_sec.setVisible(False)
 
-        # 6 — Botones
+        # 6 — Botones (en recuadro con borde rojo-acento)
         L.addSpacing(8)
+        self._btn_frame = QFrame()
+        self._btn_frame.setObjectName("btnFrame")
+        self._btn_frame.setStyleSheet(
+            "QFrame#btnFrame {"
+            "  background: rgba(10,18,50,180);"
+            "  border: 1px solid rgba(30,110,232,180);"
+            "  border-radius: 12px;"
+            "  padding: 6px;"
+            "}")
+        bf = QVBox(self._btn_frame)
+        bf.setContentsMargins(8, 6, 8, 6); bf.setSpacing(6)
+
+        _BTN_STYLE = (
+            "QPushButton {"
+            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #1a6ee8, stop:1 #0fb8c9);"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  border-radius: 10px;"
+            "  font-weight: bold;"
+            "  font-size: 13px;"
+            "  min-height: 38px;"
+            "  letter-spacing: 0.5px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #2e88f5, stop:1 #1fd0e0);"
+            "}"
+            "QPushButton:pressed {"
+            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #1050b0, stop:1 #0a90a0);"
+            "}"
+        )
+
         r1 = QW(); b1 = QHBox(r1); b1.setContentsMargins(0,0,0,0); b1.setSpacing(8)
-        self.btn_calc  = QBtn("Calcular"); self.btn_clear = QBtn("Limpiar")
+        self.btn_calc  = QBtn("Calcular");  self.btn_calc.setStyleSheet(_BTN_STYLE)
+        self.btn_clear = QBtn("Limpiar");   self.btn_clear.setStyleSheet(_BTN_STYLE)
         b1.addWidget(self.btn_calc); b1.addWidget(self.btn_clear)
-        L.addWidget(r1)
+        bf.addWidget(r1)
 
         r2 = QW(); b2 = QHBox(r2); b2.setContentsMargins(0,0,0,0); b2.setSpacing(8)
-        self.btn_export = QBtn("Exportar  ▾"); self.btn_exit = QBtn("Salir")
+        self.btn_export = QBtn("Exportar  ▾"); self.btn_export.setStyleSheet(_BTN_STYLE)
+        self.btn_exit   = QBtn("Salir");       self.btn_exit.setStyleSheet(_BTN_STYLE)
         b2.addWidget(self.btn_export); b2.addWidget(self.btn_exit)
-        L.addWidget(r2)
+        bf.addWidget(r2)
+
+        L.addWidget(self._btn_frame)
 
         # Botón Asistente IA
         L.addSpacing(4)
@@ -755,6 +1376,19 @@ class InterfazOptimizacion(QMW):
             " border:1px solid #3cff8a; }")
         self.btn_ai.setCheckable(True)
         L.addWidget(self.btn_ai)
+
+        # Botón Historial
+        L.addSpacing(4)
+        self.btn_hist = QBtn("📋  Historial de funciones")
+        self.btn_hist.setStyleSheet(
+            "QPushButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1a3a8c, stop:1 #0e2060);"
+            " color:#a8d0ff; border:1px solid #2a4ea0; border-radius:7px;"
+            " font-weight:bold; font-size:12px; min-height:33px; }"
+            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #2a50c0, stop:1 #1a3898); color:#d0e8ff; }"
+        )
+        L.addWidget(self.btn_hist)
 
         L.addSpacing(5)
         self.lbl_st = QLbl(""); self.lbl_st.setObjectName("statusLbl")
@@ -840,6 +1474,7 @@ class InterfazOptimizacion(QMW):
         self.btn_export.clicked.connect(self._exp_menu)
         self.cmb.currentTextChanged.connect(self._on_method)
         self.btn_ai.toggled.connect(self._toggle_ai_panel)
+        self.btn_hist.clicked.connect(self._show_historial)
 
     def _toggle_ai_panel(self, checked: bool):
         """Muestra u oculta el panel del asistente de IA."""
@@ -874,7 +1509,13 @@ class InterfazOptimizacion(QMW):
                 hi             = self._hi,
             )
 
-            # 2. Si el panel está visible Y hay API Key → explicación automática
+            # 2. Registrar método en la sesión para el botón "Comparar métodos"
+            if self._metodo and self._metodo not in self._session_methods:
+                self._session_methods.append(self._metodo)
+            if hasattr(self.ai_panel, 'update_session_methods'):
+                self.ai_panel.update_session_methods(self._session_methods)
+
+            # 3. Si el panel está visible Y hay API Key → explicación automática
             if self.ai_panel.isVisible() and self.ai_panel._api_key:
                 self.ai_panel.explain_calculation(
                     metodo = self._metodo,
@@ -892,15 +1533,30 @@ class InterfazOptimizacion(QMW):
     def _on_method(self):
         m = self.cmb.currentText()
         is_md    = _is_md(m)
-        is_nd    = _needs_x0(m)      # muestra vars + x0
+        is_nd    = _needs_x0(m)
+        is_mo    = _is_multiobj(m)
+        is_alpha = _needs_alpha(m)
+
         show_panel = is_md or is_nd
         self.md_sec.setVisible(show_panel)
-        # Restricción g(x) solo para métodos MD
         self.lbl_gx.setVisible(is_md)
         self.edt_gx.setVisible(is_md)
         self.row_tol.setVisible(_is_fib(m))
 
-        # Actualizar placeholder según categoría
+        # Controles α y x0 solo para métodos MO con escalarización
+        self.row_alpha.setVisible(is_alpha)
+        self.row_x0_mo.setVisible(is_mo)
+
+        # Placeholder del campo función
+        if is_mo:
+            self.edt_fx.setEnabled(True)
+            self.edt_fx.setPlaceholderText(
+                "Ingresa f(x) mono-objetivo  →  se convierte en problema MO\n"
+                "Ej: x**2    o    (x-3)**2 + 1    o    x**2 - 4*x + 3")
+        else:
+            self.edt_fx.setEnabled(True)
+            self.edt_fx.setPlaceholderText("Ej: -(x-3)**2 + 10")
+
         if _is_meta(m) or m in ("PSO: Enjambre", "GA: Algoritmo Genético"):
             self.edt_x0.setPlaceholderText("Opcional (el método genera población aleatoria)")
         elif _is_heu(m) or _is_ls(m):
@@ -915,6 +1571,33 @@ class InterfazOptimizacion(QMW):
                 try: c.clear()
                 except: pass
                 c.setVisible(False)
+
+    # ── LEYENDA COLAPSABLE ────────────────────────────────────────────────────
+    def _add_collapsible_legend(self, canvas, ax):
+        """
+        Instala el overlay de redimensionado estilo Excel sobre la leyenda.
+        Los handles aparecen solo al hacer clic en la leyenda y se ocultan
+        al hacer clic fuera de ella.
+        """
+        # Limpiar overlay anterior si existe
+        overlay_attr = f"_leg_resize_{id(canvas)}"
+        old_ov = getattr(self, overlay_attr, None)
+        if old_ov is not None:
+            try: old_ov.deleteLater()
+            except: pass
+
+        leg = ax.get_legend()
+        if leg is None:
+            return
+
+        try:
+            overlay = LegendResizeOverlay(canvas, ax)
+            # Refrescar handles cada vez que matplotlib redibuje
+            canvas.fig.canvas.mpl_connect(
+                "draw_event", lambda _ev, ov=overlay: ov.refresh())
+            setattr(self, overlay_attr, overlay)
+        except Exception:
+            pass
 
     # ── CLICK EN GRÁFICA → RE-CALCULAR / MENÚ CONTEXTUAL ────────────────────
     def _connect_click(self):
@@ -943,9 +1626,28 @@ class InterfazOptimizacion(QMW):
         except Exception:
             pass
 
+        # ── Helper: ¿el evento cae sobre la leyenda del canvas 2D? ────────────
+        def _click_on_legend(ev):
+            try:
+                fig2 = self.canvas2d.fig
+                if not fig2.axes:
+                    return False
+                leg = fig2.axes[0].get_legend()
+                if leg is None or not leg.get_visible():
+                    return False
+                renderer = self.canvas2d.fig.canvas.get_renderer()
+                bb = leg.get_window_extent(renderer)
+                return bb.contains(ev.x, ev.y)
+            except Exception:
+                return False
+
         # ── Manejador principal de eventos ───────────────────────────────────
         def _on_click(event):
-            # ── Clic DERECHO → menú contextual en español ────────────────────
+            # Si el clic (izq o der) cae sobre la leyenda → el overlay lo maneja
+            if _click_on_legend(event):
+                return
+
+            # ── Clic DERECHO fuera de la leyenda → menú contextual de la gráfica
             if event.button == 3:
                 menu = QMenu(self.canvas2d)
                 menu.setStyleSheet(
@@ -955,16 +1657,17 @@ class InterfazOptimizacion(QMW):
                     "QMenu::item:selected{background:#1a50c0;}"
                 )
                 # Acciones
-                act_home   = menu.addAction("🏠  Restablecer vista")
-                act_zoom   = menu.addAction("🔍  Acercar (zoom)")
+                act_home   = menu.addAction("🏠  Restablecer gráfica")
+                act_zoom   = menu.addAction("🔍  Zoom +")
+                act_zoomout= menu.addAction("🔎  Zoom −")
                 act_pan    = menu.addAction("✋  Mover gráfica (pan)")
                 menu.addSeparator()
                 act_save   = menu.addAction("💾  Guardar imagen…")
                 act_copy   = menu.addAction("📋  Copiar imagen al portapapeles")
                 menu.addSeparator()
                 act_grid   = menu.addAction("⊞   Alternar cuadrícula")
-                act_legend = menu.addAction("📌  Mover leyenda al centro")
                 menu.addSeparator()
+                act_calc   = menu.addAction("📍  Calcular desde este punto")
                 act_info   = menu.addAction("ℹ️   Coordenadas del cursor")
 
                 # Calcular posición global desde el widget
@@ -999,13 +1702,26 @@ class InterfazOptimizacion(QMW):
                     elif chosen == act_zoom:
                         if tb:
                             try:
-                                # Alternar modo zoom (se desactiva al volver a llamar)
                                 tb.zoom()
-                                self.lbl_st.setText("🔍 Modo zoom activo — dibuja un rectángulo en la gráfica.")
+                                self.lbl_st.setText("🔍 Zoom + activo — dibuja un rectángulo para acercar.")
                             except Exception as _ze:
                                 self.lbl_st.setText(f"⚠ Zoom no disponible: {_ze}")
                         else:
                             self.lbl_st.setText("⚠ Zoom no disponible sin NavigationToolbar.")
+
+                    elif chosen == act_zoomout:
+                        if ax2:
+                            try:
+                                xl = ax2.get_xlim(); yl = ax2.get_ylim()
+                                cx = (xl[0]+xl[1])/2; cy = (yl[0]+yl[1])/2
+                                rx = (xl[1]-xl[0])*0.65; ry = (yl[1]-yl[0])*0.65
+                                ax2.set_xlim(cx-rx, cx+rx); ax2.set_ylim(cy-ry, cy+ry)
+                                self.canvas2d.draw_idle()
+                                self.lbl_st.setText("🔎 Zoom − aplicado.")
+                            except Exception as _ze:
+                                self.lbl_st.setText(f"⚠ Zoom − error: {_ze}")
+                        else:
+                            self.lbl_st.setText("⚠ Zoom − no disponible.")
 
                     elif chosen == act_pan:
                         if tb:
@@ -1044,14 +1760,49 @@ class InterfazOptimizacion(QMW):
                                      color="#1a2e58", alpha=0.4, linewidth=0.6)
                             self.canvas2d.draw_idle()
 
-                    elif chosen == act_legend:
-                        if ax2:
-                            leg = ax2.get_legend()
-                            if leg:
-                                leg.set_bbox_to_anchor((0.5, 0.5),
-                                    transform=ax2.transAxes)
-                                leg.set_draggable(True, use_blit=False)
-                                self.canvas2d.draw_idle()
+                    elif chosen == act_calc:
+                        if hasattr(event,"xdata") and event.xdata is not None:
+                            xc = float(event.xdata)
+                            lo_, hi_ = self._lo, self._hi
+                            xc = max(lo_, min(hi_, xc))
+                            if self._metodo and self._fx:
+                                try:
+                                    self.lbl_st.setText(f"⏳ Calculando desde x = {xc:.4f}…")
+                                    QApp.processEvents()
+                                    if _is_md(self._metodo) or _is_ls(self._metodo):
+                                        new_x0 = list(self._x0)
+                                        if new_x0: new_x0[0] = xc
+                                        else: new_x0 = [xc, xc]
+                                        self.edt_x0.setText(", ".join(f"{v:.6g}" for v in new_x0))
+                                        x0_ = new_x0
+                                    else:
+                                        self.smin.setValue(xc); lo_ = xc; x0_ = [xc]
+                                    hist_ = self._run(self._metodo, self._fx, self._gx,
+                                                      self._vars, x0_, lo_, hi_, self._tol_L)
+                                    _validate_hist(hist_)
+                                    self._hist = hist_; self._x0 = x0_; self._lo = lo_
+                                    self._render_table(hist_)
+                                    self._render_plots(self._metodo, self._fx, self._vars,
+                                                       hist_, x0_, lo_, hi_)
+                                    self._connect_click()
+                                    self._session.append({
+                                        "metodo": self._metodo, "fx": self._fx, "gx": self._gx,
+                                        "vars": list(self._vars), "x0": list(x0_),
+                                        "lo": lo_, "hi": hi_, "hist": hist_,
+                                        "traj": self._traj(self._vars, hist_,
+                                                           x0_ if (_is_md(self._metodo) or _is_ls(self._metodo))
+                                                              else [lo_]),
+                                    })
+                                    self._log_history(self._metodo, self._fx, hist_)
+                                    self.lbl_st.setText(f"✓ Calculado desde x={xc:.4f} → {self._rmsg(hist_)}")
+                                except _NumericalWarning as nw:
+                                    self.lbl_st.setText(f"⚠ {nw}")
+                                except Exception as ex_:
+                                    self.lbl_st.setText(f"✗ Error: {ex_}")
+                            else:
+                                self.lbl_st.setText("⚠ No hay método activo. Ejecuta un cálculo primero.")
+                        else:
+                            self.lbl_st.setText("ℹ️ Haz clic dentro del área de la gráfica.")
 
                     elif chosen == act_info:
                         if hasattr(event,"xdata") and event.xdata is not None and event.ydata is not None:
@@ -1117,6 +1868,7 @@ class InterfazOptimizacion(QMW):
                                        x0 if (_is_md(self._metodo) or _is_ls(self._metodo))
                                           else [lo]),
                 })
+                self._log_history(self._metodo, self._fx, hist)
                 self.lbl_st.setText(
                     f"✓ {self._metodo} (x₀={xc:.4f}) → {self._rmsg(hist)}")
             except _NumericalWarning as nw:
@@ -1154,10 +1906,13 @@ class InterfazOptimizacion(QMW):
                 return
 
             fx = self.edt_fx.text().strip()
-            if not fx:
+            if not fx and m not in _MO_SCHAFFER_FIXED:
                 QMsgBox.warning(self, "⚠ Dato faltante",
                     "Por favor ingresa la función f(x).\nEjemplo: -(x-3)**2 + 10")
                 return
+            # Para métodos Schaffer fijos, definir función interna
+            if m in _MO_SCHAFFER_FIXED:
+                fx = "schaffer_interno"
 
             lo, hi = self.smin.value(), self.smax.value()
             if lo >= hi:
@@ -1167,7 +1922,7 @@ class InterfazOptimizacion(QMW):
                 return
 
             # Verificar que la función sea evaluable en el rango
-            if _SYMPY:
+            if _SYMPY and not _is_multiobj(m):
                 try:
                     fc = _get_fc()
                     if fc:
@@ -1284,6 +2039,7 @@ class InterfazOptimizacion(QMW):
                 "traj": self._traj(self._vars, hist,
                                    x0 if (_is_md(m) or _is_ls(m)) else [lo]),
             })
+            self._log_history(m, fx, hist)
             self.lbl_st.setText(f"✓ {m} → {self._rmsg(hist)}")
             self._update_ai_context()
 
@@ -1311,6 +2067,7 @@ class InterfazOptimizacion(QMW):
                     "traj": self._traj(self._vars, hist,
                                        x0 if _is_md(m) else [lo]),
                 })
+                self._log_history(m, fx, hist)
             except Exception:
                 pass  # Si la gráfica también falla, no pasa nada
         except Exception as e:
@@ -1320,6 +2077,26 @@ class InterfazOptimizacion(QMW):
     def _rmsg(self, hist):
         if not hist: return "sin resultado"
         last = hist[-1]
+
+        # ── Multiobjetivo: claves especiales ──────────────────────────────────
+        if "f1(x*)=x*²" in last or "f1(x*)=x*²" in last:
+            xv  = last.get("x*(Bisección)", last.get("x*(Sec.Dorada)", last.get("x_k","?")))
+            f1v = last.get("f1(x*)=x*²", last.get("f1(x*)", "?"))
+            f2v = last.get("f2(x*)=(x*-2)²", last.get("f2(x*)", "?"))
+            alv = last.get("α", "?")
+            try: return (f"α={alv}  x*={float(xv):.4f}  "
+                         f"f1={float(f1v):.4f}  f2={float(f2v):.4f}")
+            except: return f"α={alv}  f1={f1v}  f2={f2v}"
+        if "f1(x*)" in last and "f2(x*)" in last:
+            xv  = last.get("x*(α)", last.get("x_k","?"))
+            f1v = last.get("f1(x*)","?"); f2v = last.get("f2(x*)","?")
+            try: return (f"x*={float(xv):.4f}  f1={float(f1v):.4f}  f2={float(f2v):.4f}")
+            except: return f"f1={f1v}  f2={f2v}"
+        if "J[f1]=2x" in last:
+            xv = last.get("x","?"); nj = last.get("‖J‖","?")
+            pareto = last.get("¿Pareto-opt?","")
+            try: return f"x={float(xv):.4f}  ‖J‖={float(nj):.4f}  {pareto}"
+            except: return f"x={xv}  {pareto}"
 
         def _safe_get(rec, *keys):
             for k in keys:
@@ -1358,14 +2135,204 @@ class InterfazOptimizacion(QMW):
         self.smin.setValue(0.0); self.smax.setValue(5.0)
         self.lbl_st.setText("")
         self._hist=[]; self._metodo=self._fx=""; self._vars=[]; self._x0=[]
-        self._session=[]
+        self._session=[]; self._session_methods=[]
+        if self.ai_panel and hasattr(self.ai_panel, 'update_session_methods'):
+            self.ai_panel.update_session_methods([])
         self.md_sec.setVisible(False); self.row_tol.setVisible(False)
         self._reset()
+
+    # ── HISTORIAL ─────────────────────────────────────────────────────────────
+    def _log_history(self, metodo: str, fx: str, hist: list):
+        """Registra una entrada en el historial persistente."""
+        import datetime
+        # resultado final
+        xopt = fopt = float("nan")
+        try:
+            last = hist[-1]
+            xopt = float(last.get("x", float("nan")))
+            fopt = float(last.get("f_mu", last.get("mu_k", last.get("f_lambda",
+                         last.get("fx", float("nan"))))))
+        except Exception:
+            pass
+        self._history_log.append({
+            "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+            "metodo": metodo,
+            "fx": fx,
+            "iters": len(hist),
+            "xopt": xopt,
+            "fopt": fopt,
+        })
+
+    def _show_historial(self):
+        """Muestra el historial de funciones y métodos en un diálogo."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("📋  Historial de funciones")
+        dlg.setMinimumSize(820, 460)
+        dlg.setStyleSheet(
+            "QDialog { background:#0d1830; }"
+            "QLabel#titulo { color:#7ab0ff; font-size:15px; font-weight:bold; padding:6px 0; }"
+            "QLabel#hint { color:#4a7090; font-size:11px; padding:0 0 4px 0; }"
+            "QTableWidget { background:#0a1525; color:#d8e8f8; gridline-color:#1a3060;"
+            "  border:1px solid #2a4080; border-radius:6px; font-size:12px; }"
+            "QTableWidget::item { padding:4px 8px; }"
+            "QTableWidget::item:selected { background:#1a50c0; color:#fff; }"
+            "QHeaderView::section { background:#0e1e40; color:#7ab0ff; font-weight:bold;"
+            "  font-size:11px; padding:5px 8px; border:none; border-bottom:1px solid #2a4080; }"
+            "QPushButton { background:#0e2060; color:#a8d0ff; border:1px solid #2a4ea0;"
+            "  border-radius:6px; font-size:12px; padding:5px 18px; font-weight:bold; }"
+            "QPushButton:hover { background:#1a3898; color:#d0e8ff; }"
+            "QPushButton:disabled { background:#0a1530; color:#3a5070; border-color:#1a2a50; }"
+            "QPushButton#btnRecalc { background:#0e3a1a; color:#3cff8a; border-color:#1a6040; }"
+            "QPushButton#btnRecalc:hover { background:#1a5a2a; color:#80ffb0; }"
+            "QPushButton#btnRecalc:disabled { background:#0a1510; color:#1a3020; border-color:#0a2010; }"
+            "QPushButton#btnCargar { background:#0e2a50; color:#60c0ff; border-color:#1a4a80; }"
+            "QPushButton#btnCargar:hover { background:#1a4a80; color:#a0d8ff; }"
+            "QPushButton#btnCargar:disabled { background:#0a1525; color:#1a3050; border-color:#0a1a35; }"
+            "QPushButton#btnBorrar { background:#3a0a0a; color:#ff8080; border-color:#6a2020; }"
+            "QPushButton#btnBorrar:hover { background:#5a1010; }"
+        )
+        vl = QVBox(dlg); vl.setContentsMargins(14, 10, 14, 12); vl.setSpacing(6)
+
+        titulo = QLbl("Historial de funciones y métodos"); titulo.setObjectName("titulo")
+        vl.addWidget(titulo)
+        hint = QLbl("Selecciona una fila y usa los botones, o haz doble clic para cargar la función y recalcular.")
+        hint.setObjectName("hint"); vl.addWidget(hint)
+
+        tbl = QTbl(0, 6)
+        tbl.setHorizontalHeaderLabels(["Hora", "Función f(x)", "Método", "Iteraciones", "x*", "f(x*)"])
+        tbl.horizontalHeader().setStretchLastSection(False)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+                            if _QT=="PyQt6" else QtWidgets.QAbstractItemView.NoEditTriggers)
+        tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+                                 if _QT=="PyQt6" else QtWidgets.QAbstractItemView.SelectRows)
+        tbl.setAlternatingRowColors(True)
+        hh = tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHV.ResizeMode.ResizeToContents if _QT=="PyQt6" else QHV.ResizeToContents)
+        hh.setSectionResizeMode(1, QHV.ResizeMode.Stretch if _QT=="PyQt6" else QHV.Stretch)
+        hh.setSectionResizeMode(2, QHV.ResizeMode.ResizeToContents if _QT=="PyQt6" else QHV.ResizeToContents)
+        hh.setSectionResizeMode(3, QHV.ResizeMode.ResizeToContents if _QT=="PyQt6" else QHV.ResizeToContents)
+        hh.setSectionResizeMode(4, QHV.ResizeMode.ResizeToContents if _QT=="PyQt6" else QHV.ResizeToContents)
+        hh.setSectionResizeMode(5, QHV.ResizeMode.ResizeToContents if _QT=="PyQt6" else QHV.ResizeToContents)
+
+        def _fill():
+            tbl.setRowCount(0)
+            for i, e in enumerate(self._history_log):
+                tbl.insertRow(i)
+                xv = f"{e['xopt']:.5f}" if not (e['xopt'] != e['xopt']) else "—"
+                fv = f"{e['fopt']:.5f}" if not (e['fopt'] != e['fopt']) else "—"
+                for j, val in enumerate([e["timestamp"], e["fx"], e["metodo"],
+                                          str(e["iters"]), xv, fv]):
+                    it = QTI(val)
+                    it.setTextAlignment(_AL("AlignVCenter", "AlignHCenter")
+                                        if j in (0,3,4,5) else _AL("AlignVCenter", "AlignLeft"))
+                    tbl.setItem(i, j, it)
+
+        _fill()
+        vl.addWidget(tbl, 1)
+
+        # ── Botones de acción ──────────────────────────────────────────────────
+        brow = QW(); brl = QHBox(brow); brl.setContentsMargins(0,4,0,0); brl.setSpacing(8)
+
+        btn_recalc = QBtn("🔄  Cargar y recalcular"); btn_recalc.setObjectName("btnRecalc")
+        btn_cargar = QBtn("📥  Cargar función");      btn_cargar.setObjectName("btnCargar")
+        btn_borrar = QBtn("🗑  Limpiar historial");   btn_borrar.setObjectName("btnBorrar")
+        btn_close  = QBtn("Cerrar")
+
+        btn_recalc.setEnabled(False); btn_recalc.setToolTip("Carga la función y el método del historial y ejecuta el cálculo")
+        btn_cargar.setEnabled(False); btn_cargar.setToolTip("Carga solo la función en el panel (puedes cambiar el método antes de calcular)")
+
+        brl.addWidget(btn_recalc)
+        brl.addWidget(btn_cargar)
+        brl.addSpacing(12)
+        brl.addWidget(btn_borrar)
+        brl.addStretch()
+        brl.addWidget(btn_close)
+        vl.addWidget(brow)
+
+        # Habilitar botones solo cuando hay selección
+        def _on_selection():
+            has = bool(tbl.selectedItems())
+            btn_recalc.setEnabled(has)
+            btn_cargar.setEnabled(has)
+
+        tbl.itemSelectionChanged.connect(_on_selection)
+
+        def _selected_entry():
+            rows = tbl.selectedItems()
+            if not rows:
+                return None
+            row = tbl.currentRow()
+            if 0 <= row < len(self._history_log):
+                return self._history_log[row]
+            return None
+
+        def _load_entry(entry, recalcular: bool):
+            """Carga función y opcionalmente el método en el panel principal."""
+            if entry is None:
+                return
+            # Cargar función
+            self.edt_fx.setText(entry["fx"])
+            # Cargar método si corresponde
+            metodo = entry["metodo"]
+            idx = self.cmb.findText(metodo)
+            if idx >= 0:
+                self.cmb.setCurrentIndex(idx)
+            # Cerrar diálogo
+            dlg.accept()
+            # Recalcular si se pidió
+            if recalcular:
+                QtCore.QTimer.singleShot(80, self.ejecutar)
+
+        def _do_recalc():
+            _load_entry(_selected_entry(), recalcular=True)
+
+        def _do_cargar():
+            _load_entry(_selected_entry(), recalcular=False)
+
+        def _on_double_click(row, _col):
+            if 0 <= row < len(self._history_log):
+                _load_entry(self._history_log[row], recalcular=True)
+
+        btn_recalc.clicked.connect(_do_recalc)
+        btn_cargar.clicked.connect(_do_cargar)
+        tbl.cellDoubleClicked.connect(_on_double_click)
+
+        def _borrar():
+            r = QMsgBox.question(dlg, "Confirmar",
+                                 "¿Desea borrar todo el historial?",
+                                 QMsgBox.StandardButton.Yes | QMsgBox.StandardButton.No
+                                 if _QT=="PyQt6" else QMsgBox.Yes | QMsgBox.No)
+            yes_btn = QMsgBox.StandardButton.Yes if _QT=="PyQt6" else QMsgBox.Yes
+            if r == yes_btn:
+                self._history_log.clear()
+                _fill()
+                btn_recalc.setEnabled(False)
+                btn_cargar.setEnabled(False)
+
+        btn_borrar.clicked.connect(_borrar)
+        btn_close.clicked.connect(dlg.accept)
+        dlg.exec() if _QT=="PyQt6" else dlg.exec_()
 
     def salir(self):
         yes = QMsgBox.StandardButton.Yes if _QT=="PyQt6" else QMsgBox.Yes
         no  = QMsgBox.StandardButton.No  if _QT=="PyQt6" else QMsgBox.No
-        if QMsgBox.question(self,"Salir","¿Salir de la aplicación?",yes|no,no)==yes:
+        dlg = QMsgBox(self)
+        dlg.setWindowTitle("Salir")
+        dlg.setText("¿Desea salir de la aplicación?")
+        dlg.setIcon(QMsgBox.Icon.Question if _QT=="PyQt6" else QMsgBox.Question)
+        dlg.setStandardButtons(yes | no)
+        dlg.setDefaultButton(no)
+        # Texto más grande
+        dlg.setStyleSheet("QLabel { font-size: 15px; font-weight: bold; min-width: 280px; }"
+                          "QPushButton { font-size: 13px; padding: 6px 24px; }")
+        try:
+            dlg.button(yes).setText("Sí")
+            dlg.button(no).setText("No")
+        except Exception:
+            pass
+        result = dlg.exec() if _QT=="PyQt6" else dlg.exec_()
+        if result == yes:
             for c in (self.canvas2d,self.canvas3d):
                 if not c: continue
                 try: c.stop_animation()
@@ -1383,7 +2350,7 @@ class InterfazOptimizacion(QMW):
             "QMenu::item:selected{background:#1a50c0;}"
             "QMenu::separator{height:1px;background:#2a3e6e;margin:4px 10px;}"
         )
-        m.addAction("📄 Exportar como CSV").triggered.connect(self.export_csv)
+        m.addAction("📄 Exportar como CSV").triggered.connect(self.export_csv_db)
         m.addAction("📊 Exportar como Excel (.xlsx)").triggered.connect(self.export_xlsx)
         m.addAction("📑 Exportar como PDF").triggered.connect(self.export_pdf)
         m.exec(self.btn_export.mapToGlobal(self.btn_export.rect().bottomLeft()))
@@ -1541,6 +2508,97 @@ class InterfazOptimizacion(QMW):
                 x_k_list=x0_use, u_in=lo, v_in=hi, mu=0.6)
             return log or []
 
+        # ── BISECCIÓN y SECCIÓN DORADA (autónomas, sin módulos externos) ───────
+        if metodo == "Bisección":
+            fn1d   = _f1d_callable(_norm(fx))
+            h      = max((hi - lo) * 1e-5, 1e-9)
+            fprime = lambda xv: (fn1d(xv + h) - fn1d(xv - h)) / (2.0 * h)
+            a_b, b_b = float(lo), float(hi)
+            tol_b, max_b = 1e-8, 300
+
+            # Buscar subintervalo con cambio de signo en f'
+            if fprime(a_b) * fprime(b_b) > 0:
+                n_sub  = 400
+                xs_sub = np.linspace(a_b, b_b, n_sub)
+                found  = False
+                for _i in range(n_sub - 1):
+                    if fprime(xs_sub[_i]) * fprime(xs_sub[_i+1]) <= 0:
+                        a_b, b_b = float(xs_sub[_i]), float(xs_sub[_i+1])
+                        found = True; break
+                if not found:
+                    ys_sub = np.array([fn1d(xv) for xv in xs_sub])
+                    xopt   = float(xs_sub[np.argmin(ys_sub)])
+                    return [{"k": 0, "x_k": round(xopt, 8),
+                             "f_k": round(fn1d(xopt), 8),
+                             "f'(x_k)": round(fprime(xopt), 8),
+                             "b-a": round(b_b - a_b, 8),
+                             "nota": "sin cambio signo; retorna mín. en grid"}]
+
+            hist_b: list = []
+            for k in range(max_b):
+                xm  = (a_b + b_b) / 2.0
+                fpm = fprime(xm)
+                largo = b_b - a_b
+                hist_b.append({
+                    "k":        k,
+                    "a_k":      round(a_b, 8),
+                    "b_k":      round(b_b, 8),
+                    "x_k":      round(xm,  8),
+                    "f_k":      round(fn1d(xm), 8),
+                    "f'(x_k)":  round(fpm,  8),
+                    "b-a":      round(largo, 8),
+                    "converged": largo < tol_b or abs(fpm) < tol_b,
+                })
+                if largo < tol_b or abs(fpm) < tol_b:
+                    break
+                if fprime(a_b) * fpm < 0:
+                    b_b = xm
+                else:
+                    a_b = xm
+            return hist_b
+
+        if metodo == "Sección Dorada":
+            fn1d = _f1d_callable(_norm(fx))
+            phi  = (math.sqrt(5.0) - 1.0) / 2.0   # ≈ 0.61803…
+            a_g, b_g = float(lo), float(hi)
+            tol_g, max_g = 1e-8, 300
+
+            c_g  = b_g - phi * (b_g - a_g)
+            d_g  = a_g + phi * (b_g - a_g)
+            fc_g = fn1d(c_g); fd_g = fn1d(d_g)
+
+            hist_g: list = []
+            for k in range(max_g):
+                largo = b_g - a_g
+                xm    = (a_g + b_g) / 2.0
+                hist_g.append({
+                    "k":      k,
+                    "a_k":    round(a_g,  8),
+                    "b_k":    round(b_g,  8),
+                    "c_k":    round(c_g,  8),
+                    "f(c_k)": round(fc_g, 8),
+                    "d_k":    round(d_g,  8),
+                    "f(d_k)": round(fd_g, 8),
+                    "x_k":    round(xm,   8),
+                    "f_k":    round(fn1d(xm), 8),
+                    "b-a":    round(largo, 8),
+                    "r_φ":    round(phi,   6),
+                    "converged": largo < tol_g,
+                })
+                if largo < tol_g:
+                    break
+                if fc_g < fd_g:
+                    b_g = d_g; d_g = c_g; fd_g = fc_g
+                    c_g = b_g - phi * (b_g - a_g); fc_g = fn1d(c_g)
+                else:
+                    a_g = c_g; c_g = d_g; fc_g = fd_g
+                    d_g = a_g + phi * (b_g - a_g); fd_g = fn1d(d_g)
+
+            xopt_g = (a_g + b_g) / 2.0
+            hist_g[-1]["x_k"] = round(xopt_g, 8)
+            hist_g[-1]["f_k"] = round(fn1d(xopt_g), 8)
+            return hist_g
+
         # ── HEURÍSTICOS ───────────────────────────────────────────────────────
         if metodo == "Sección Áurea":
             if not _heuristics_mod: raise RuntimeError(
@@ -1676,6 +2734,268 @@ class InterfazOptimizacion(QMW):
             _,_,hist = fn(norm_fx, norm_gx, var_str, x0_md)
             return hist
 
+        # ── MULTIOBJETIVO ─────────────────────────────────────────────────────
+        # Flujo: f(x) mono-objetivo del usuario
+        #        → Escalarización: F(x)=(f1,f2) donde f1=f(x), f2=(x-x_c)²
+        #        → φ(x,α) = α·f1(x) + (1-α)·f2(x)   para α dado
+        #        → Resolver φ con Bisección o Sección Dorada
+        #        → La tabla de α es un RESULTADO de referencia (no método)
+        if _is_multiobj(metodo):
+            mo = _get_multiobj()
+            if mo is None:
+                raise RuntimeError(
+                    "multiobj_schaffer.py no encontrado.\n"
+                    "Coloca el archivo junto a interfaz_qt.py.")
+            if not fx or fx == "schaffer_interno":
+                raise RuntimeError(
+                    "Ingresa la función f(x) mono-objetivo en el campo superior.\n"
+                    "El optimizador la convertirá en problema multiobjetivo.")
+
+            import math as _math
+            norm_fx_mo = _norm(fx)
+            v_names    = _detect_vars(norm_fx_mo)
+            var1       = v_names[0] if v_names else "x"
+
+            # Punto inicial
+            try:
+                x0_mo_txt = getattr(self, 'edt_x0_mo', None)
+                x0_start  = float(x0_mo_txt.text().strip()) if x0_mo_txt and x0_mo_txt.text().strip() else (lo+hi)/2
+            except Exception:
+                x0_start = (lo + hi) / 2
+
+            # α del spinner
+            a_val = getattr(self, 'edt_alpha', None)
+            a_val = float(a_val.value()) if a_val else 0.5
+
+            # Construir f1 y f2 callables
+            if not _SYMPY:
+                raise RuntimeError("SymPy es necesario para métodos multiobjetivo.")
+            sym_x   = sp.Symbol(var1)
+            sym_f1  = sp.sympify(norm_fx_mo)
+            sym_df1 = sp.diff(sym_f1, sym_x)
+            sym_d2f1= sp.diff(sym_df1, sym_x)
+            f1_call  = sp.lambdify(sym_x, sym_f1,   modules=["numpy"])
+            df1_call = sp.lambdify(sym_x, sym_df1,  modules=["numpy"])
+            d2f1_call= sp.lambdify(sym_x, sym_d2f1, modules=["numpy"])
+
+            x_c  = (lo + hi) / 2.0          # centro del rango → f2 centrada
+            f2   = lambda xv: (float(xv) - x_c)**2
+            df2  = lambda xv: 2.0*(float(xv) - x_c)
+            d2f2 = lambda _xv: 2.0
+
+            # φ(x,α) escalarizada y su derivada
+            phi   = lambda xv, a: a*float(f1_call(xv)) + (1-a)*float(f2(xv))
+            dphi  = lambda xv, a: a*float(df1_call(xv)) + (1-a)*float(df2(xv))
+            d2phi = lambda xv, a: a*float(d2f1_call(xv)) + (1-a)*float(d2f2(xv))
+
+            # ── Tabla de referencia α (siempre se calcula, se guarda en hist) ──
+            # Resuelve φ con Sección Dorada para α = {0,1/5,1/4,1/3,1/2,1}
+            _ALPHAS_REF = [
+                (0.0,   "0"),
+                (1/5,   "1/5"),
+                (1/4,   "1/4"),
+                (1/3,   "1/3"),
+                (1/2,   "1/2"),
+                (1.0,   "1"),
+            ]
+            tabla_ref = []
+            for a_r, a_str in _ALPHAS_REF:
+                # Sección Dorada rápida para cada α
+                phi_r = lambda xv, a=a_r: a*float(f1_call(xv)) + (1-a)*float(f2(xv))
+                p_g = (_math.sqrt(5)-1)/2
+                ag_, bg_ = float(lo), float(hi)
+                cg_ = bg_-p_g*(bg_-ag_); dg_ = ag_+p_g*(bg_-ag_)
+                fcg_=phi_r(cg_); fdg_=phi_r(dg_)
+                for _ in range(200):
+                    if bg_-ag_ < 1e-8: break
+                    if fcg_<fdg_: bg_=dg_; dg_=cg_; fdg_=fcg_; cg_=bg_-p_g*(bg_-ag_); fcg_=phi_r(cg_)
+                    else:         ag_=cg_; cg_=dg_; fcg_=fdg_; dg_=ag_+p_g*(bg_-ag_); fdg_=phi_r(dg_)
+                xopt_r = (ag_+bg_)/2
+                try:
+                    f1r = float(f1_call(xopt_r)); f2r = float(f2(xopt_r))
+                    phi_r_val = float(phi_r(xopt_r))
+                except Exception:
+                    f1r = f2r = phi_r_val = float("nan")
+                tabla_ref.append({
+                    "α": a_str,
+                    "f(x,α)": f"α·f₁+(1-α)·(x-{x_c:.2f})²",
+                    "x*(α)":  round(xopt_r, 6),
+                    "f₁(x*)": round(f1r, 6),
+                    "f₂(x*)": round(f2r, 6),
+                    "φ(x*,α)": round(phi_r_val, 6),
+                })
+
+            # ═══════════════════════════════════════════════════════════════════
+            # MO — BISECCIÓN
+            # ═══════════════════════════════════════════════════════════════════
+            if metodo == "MO — Bisección":
+                h = max((hi-lo)*1e-5, 1e-9)
+                fp_num = lambda xv: (phi(xv+h,a_val) - phi(xv-h,a_val))/(2*h)
+                a_b, b_b = float(lo), float(hi)
+                # buscar cambio de signo en φ'
+                fa_s, fb_s = fp_num(a_b), fp_num(b_b)
+                if fa_s * fb_s > 0:
+                    xs_ = np.linspace(a_b, b_b, 500)
+                    for _i in range(len(xs_)-1):
+                        if fp_num(xs_[_i])*fp_num(xs_[_i+1]) <= 0:
+                            a_b, b_b = float(xs_[_i]), float(xs_[_i+1]); break
+                hist_b = []
+                for k in range(300):
+                    xm = (a_b+b_b)/2.0; fpm = fp_num(xm); largo = b_b-a_b
+                    try:
+                        f1v = float(f1_call(xm)); f2v = float(f2(xm))
+                        phiv= float(phi(xm, a_val))
+                    except Exception:
+                        f1v = f2v = phiv = float("nan")
+                    hist_b.append({
+                        "k":          k,
+                        "a_k":        round(a_b,   8),
+                        "b_k":        round(b_b,   8),
+                        "x_k":        round(xm,    8),
+                        "φ(x_k,α)":  round(phiv,  8),
+                        "φ'(x_k,α)": round(fpm,   8),
+                        "b−a":        round(largo,  8),
+                        "f₁(x_k)":   round(f1v,   6),
+                        "f₂(x_k)":   round(f2v,   6),
+                        "α":          round(a_val, 4),
+                        "converged":  largo < 1e-8 or abs(fpm) < 1e-8,
+                    })
+                    if largo < 1e-8 or abs(fpm) < 1e-8: break
+                    if fp_num(a_b)*fpm < 0: b_b = xm
+                    else:                   a_b = xm
+                # Adjuntar tabla de referencia α al final como filas separadas
+                hist_b.append({"k": "──", "a_k": "── TABLA DE REFERENCIA α ──",
+                                "b_k":"", "x_k":"", "φ(x_k,α)":"",
+                                "φ'(x_k,α)":"","b−a":"","f₁(x_k)":"","f₂(x_k)":"",
+                                "α":"","converged":""})
+                for row in tabla_ref:
+                    hist_b.append({
+                        "k":          "ref",
+                        "a_k":        row["α"],
+                        "b_k":        row["f(x,α)"],
+                        "x_k":        row["x*(α)"],
+                        "φ(x_k,α)":  row["φ(x*,α)"],
+                        "φ'(x_k,α)": "",
+                        "b−a":        "",
+                        "f₁(x_k)":   row["f₁(x*)"],
+                        "f₂(x_k)":   row["f₂(x*)"],
+                        "α":          row["α"],
+                        "converged":  "",
+                    })
+                # Guardar tabla ref para gráficas
+                self._mo_tabla_ref   = tabla_ref
+                self._mo_hist_iters  = [r for r in hist_b if r.get("k") not in ("──","ref")]
+                self._mo_alpha       = a_val
+                self._mo_x_c         = x_c
+                self._mo_f1_call     = f1_call
+                self._mo_f2_call     = f2
+                self._mo_var1        = var1
+                return hist_b
+
+            # ═══════════════════════════════════════════════════════════════════
+            # MO — SECCIÓN DORADA
+            # ═══════════════════════════════════════════════════════════════════
+            if metodo == "MO — Sección Dorada":
+                p_g = (_math.sqrt(5)-1)/2
+                ag_, bg_ = float(lo), float(hi)
+                cg_ = bg_-p_g*(bg_-ag_); dg_ = ag_+p_g*(bg_-ag_)
+                fcg_ = phi(cg_,a_val); fdg_ = phi(dg_,a_val)
+                hist_g = []
+                for k in range(300):
+                    largo = bg_-ag_; xm = (ag_+bg_)/2
+                    try:
+                        f1v = float(f1_call(xm)); f2v = float(f2(xm))
+                        phiv= float(phi(xm, a_val))
+                    except Exception:
+                        f1v = f2v = phiv = float("nan")
+                    hist_g.append({
+                        "k":         k,
+                        "a_k":       round(ag_,  8),
+                        "b_k":       round(bg_,  8),
+                        "c_k":       round(cg_,  8),
+                        "φ(c)":      round(fcg_, 8),
+                        "d_k":       round(dg_,  8),
+                        "φ(d)":      round(fdg_, 8),
+                        "x_k":       round(xm,   8),
+                        "φ(x_k,α)": round(phiv, 8),
+                        "b−a":       round(largo, 8),
+                        "φ":         round(p_g,  6),
+                        "f₁(x_k)":  round(f1v,  6),
+                        "f₂(x_k)":  round(f2v,  6),
+                        "α":         round(a_val, 4),
+                        "converged": largo < 1e-8,
+                    })
+                    if largo < 1e-8: break
+                    if fcg_ < fdg_:
+                        bg_=dg_; dg_=cg_; fdg_=fcg_
+                        cg_=bg_-p_g*(bg_-ag_); fcg_=phi(cg_,a_val)
+                    else:
+                        ag_=cg_; cg_=dg_; fcg_=fdg_
+                        dg_=ag_+p_g*(bg_-ag_); fdg_=phi(dg_,a_val)
+                xopt_g = (ag_+bg_)/2
+                try:
+                    hist_g[-1]["x_k"]       = round(xopt_g, 8)
+                    hist_g[-1]["φ(x_k,α)"] = round(phi(xopt_g,a_val), 8)
+                    hist_g[-1]["f₁(x_k)"]  = round(float(f1_call(xopt_g)), 6)
+                    hist_g[-1]["f₂(x_k)"]  = round(float(f2(xopt_g)), 6)
+                except Exception:
+                    pass
+                # Adjuntar tabla de referencia α
+                hist_g.append({"k":"──","a_k":"── TABLA DE REFERENCIA α ──",
+                                "b_k":"","c_k":"","φ(c)":"","d_k":"","φ(d)":"",
+                                "x_k":"","φ(x_k,α)":"","b−a":"","φ":"",
+                                "f₁(x_k)":"","f₂(x_k)":"","α":"","converged":""})
+                for row in tabla_ref:
+                    hist_g.append({
+                        "k":         "ref",
+                        "a_k":       row["α"],
+                        "b_k":       row["f(x,α)"],
+                        "c_k": "", "φ(c)":"","d_k":"","φ(d)":"",
+                        "x_k":       row["x*(α)"],
+                        "φ(x_k,α)": row["φ(x*,α)"],
+                        "b−a": "", "φ":"",
+                        "f₁(x_k)":  row["f₁(x*)"],
+                        "f₂(x_k)":  row["f₂(x*)"],
+                        "α":         row["α"],
+                        "converged": "",
+                    })
+                self._mo_tabla_ref   = tabla_ref
+                self._mo_hist_iters  = [r for r in hist_g if r.get("k") not in ("──","ref")]
+                self._mo_alpha       = a_val
+                self._mo_x_c         = x_c
+                self._mo_f1_call     = f1_call
+                self._mo_f2_call     = f2
+                self._mo_var1        = var1
+                return hist_g
+
+            # ═══════════════════════════════════════════════════════════════════
+            # MO — FRENTE DE PARETO
+            # ═══════════════════════════════════════════════════════════════════
+            if metodo == "MO — Frente de Pareto":
+                result = mo.pareto_front_generic(
+                    func_expr=norm_fx_mo, var_name=var1,
+                    x0=x0_start, lo=lo, hi=hi, n_alpha=80)
+                self._mo_tabla_ref  = tabla_ref
+                self._mo_f1_call    = f1_call
+                self._mo_f2_call    = f2
+                self._mo_x_c        = x_c
+                self._mo_var1       = var1
+                return result["history"]
+
+            # ═══════════════════════════════════════════════════════════════════
+            # MO — ANÁLISIS JACOBIANO
+            # ═══════════════════════════════════════════════════════════════════
+            if metodo == "MO — Análisis Jacobiano":
+                rows_j = mo.jacobian_generic(
+                    func_expr=norm_fx_mo, var_name=var1,
+                    x0=x0_start, lo=lo, hi=hi, n_points=15)
+                self._mo_tabla_ref = tabla_ref
+                self._mo_f1_call   = f1_call
+                self._mo_f2_call   = f2
+                self._mo_x_c       = x_c
+                self._mo_var1      = var1
+                return rows_j
+
         return []
 
     # ── TABLA ─────────────────────────────────────────────────────────────────
@@ -1705,6 +3025,11 @@ class InterfazOptimizacion(QMW):
         """Dibuja directamente sobre matplotlib fig del canvas, con trayectoria completa."""
         import matplotlib.pyplot as plt
         import matplotlib.ticker as ticker
+
+        # ── DESVÍO: métodos multiobjetivo → render especial ───────────────────
+        if _is_multiobj(metodo):
+            self._render_plots_multiobj(metodo, fx, hist, lo, hi)
+            return
 
         # ── Reconciliar variables con la expresión ────────────────────────────
         # Garantizar que vars_ coincide exactamente con las variables que usa fx.
@@ -1779,7 +3104,7 @@ class InterfazOptimizacion(QMW):
                         ax.plot(tx[0], ty[0], 'o', color="#00e5ff",
                                 markersize=9, label=f"x₀ = {tx[0]:.4f}", zorder=6)
                         # Punto óptimo
-                        ax.plot(tx[-1], ty[-1], 'D', color=CM, markersize=11,
+                        ax.plot(tx[-1], ty[-1], 'D', color=CM, markersize=7,
                                 label=f"x* = {tx[-1]:.4f}, f* = {ty[-1]:.4f}", zorder=7)
                         # Línea vertical al óptimo
                         ax.axvline(tx[-1], color=CM, lw=0.8, linestyle='--', alpha=0.5)
@@ -1806,7 +3131,7 @@ class InterfazOptimizacion(QMW):
                         ax.plot(px[0],  py[0],  'o', color="#00e5ff",
                                 markersize=9, label="x₀", zorder=6)
                         ax.plot(px[-1], py[-1], 'D', color=CM,
-                                markersize=11, label="x*", zorder=7)
+                                markersize=7, label="x*", zorder=7)
                         ax.annotate(f"x*=({px[-1]:.3f},{py[-1]:.3f})",
                                     xy=(px[-1], py[-1]),
                                     xytext=(px[-1]+0.05*(hi-lo), py[-1]+0.05*(hi-lo)),
@@ -1817,12 +3142,16 @@ class InterfazOptimizacion(QMW):
                 ax.set_title(f"2D — {metodo}", fontsize=10, pad=8)
                 leg2d = ax.legend(facecolor="#141e36", edgecolor="#2a3e6e",
                           labelcolor="#d8e8f8", fontsize=8,
-                          loc="lower left", ncol=2,
-                          framealpha=0.88)
+                          loc="upper left",
+                          ncol=1, framealpha=0.88,
+                          borderaxespad=0.5)
                 try: leg2d.set_draggable(True)   # leyenda arrastrable
                 except: pass
                 fig.tight_layout()
                 try: self.canvas2d.draw()
+                except: pass
+                # Botón colapsar/expandir leyenda 2D
+                try: self._add_collapsible_legend(self.canvas2d, ax)
                 except: pass
             except Exception as e:
                 self.lbl_2d.setText(f"⚠ 2D: {e}"); self.lbl_2d.setVisible(True)
@@ -1874,7 +3203,7 @@ class InterfazOptimizacion(QMW):
                         ax3.plot([pit[0]],  [tx[0]],  [ty[0]],  'o',
                                  color="#00e5ff", markersize=9, label="x₀", zorder=6)
                         ax3.plot([pit[-1]], [tx[-1]], [ty[-1]], 'D',
-                                 color=CM, markersize=10, label="x*", zorder=7)
+                                 color=CM, markersize=7, label="x*", zorder=7)
                     ax3.set_xlabel("iter."); ax3.set_ylabel(vars_[0]); ax3.set_zlabel("f(x)")
                 else:
                     g  = np.linspace(min(lo,hi), max(lo,hi), 60)
@@ -1895,18 +3224,28 @@ class InterfazOptimizacion(QMW):
                         ax3.plot([px[0]],  [py[0]],  [pz[0]],  'o',
                                  color="#00e5ff", markersize=9, label="x₀", zorder=6)
                         ax3.plot([px[-1]], [py[-1]], [pz[-1]], 'D',
-                                 color=CM, markersize=10, label="x*", zorder=7)
+                                 color=CM, markersize=7, label="x*", zorder=7)
                     ax3.set_xlabel(vars_[0]); ax3.set_ylabel(vars_[1]); ax3.set_zlabel("f(x)")
 
                 ax3.set_title(f"3D — {metodo}", fontsize=10, color="#d8e8f8", pad=10)
-                leg3d = ax3.legend(facecolor="#141e36", edgecolor="#2a3e6e",
-                           labelcolor="#d8e8f8", fontsize=8,
-                           loc="lower left", framealpha=0.88)
-                try: leg3d.set_draggable(True)   # leyenda arrastrable
-                except: pass
+                _h3, _l3 = ax3.get_legend_handles_labels()
+                if _h3:
+                    leg3d = fig3.legend(_h3, _l3,
+                               facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=8,
+                               loc="upper left",
+                               bbox_to_anchor=(0.02, 0.97),
+                               bbox_transform=fig3.transFigure,
+                               ncol=1, framealpha=0.88,
+                               borderaxespad=0.5)
+                    try: leg3d.set_draggable(True)
+                    except: pass
                 ax3.view_init(elev=28, azim=-55)
                 fig3.tight_layout()
                 try: self.canvas3d.draw()
+                except: pass
+                # Botón colapsar/expandir leyenda 3D
+                try: self._add_collapsible_legend(self.canvas3d, ax3)
                 except: pass
 
                 # Rotación automática via QTimer
@@ -1953,6 +3292,289 @@ class InterfazOptimizacion(QMW):
                 self.lbl_3d.setText(f"⚠ 3D: {e}"); self.lbl_3d.setVisible(True)
                 self.canvas3d.setVisible(False)
 
+
+
+    # ── GRÁFICAS MULTIOBJETIVO ────────────────────────────────────────────────
+    # ── GRÁFICAS MULTIOBJETIVO ───────────────────────────────────────────────
+    def _render_plots_multiobj(self, metodo, fx, hist, lo, hi):
+        """
+        Renderiza gráficas para problemas multiobjetivo.
+        Flujo: f(x) mono-objetivo → Escalarización φ(x,α) → Algoritmo → Resultados MO
+        La tabla de α se muestra como referencia dentro de la gráfica.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+
+        BG = "#0a1228"; CC = "#4a9eff"; CT = "#ff6b35"; CM = "#ffd700"
+        C2 = "#3cff8a"; CGRID = "#1a2e58"
+
+        def _sax(ax):
+            ax.set_facecolor(BG)
+            for sp in ax.spines.values(): sp.set_color("#2a3e6e")
+            ax.tick_params(colors="#7aaaea", labelsize=8)
+            ax.xaxis.label.set_color("#7aaaea"); ax.yaxis.label.set_color("#7aaaea")
+            ax.title.set_color("#d8e8f8")
+            ax.grid(True, color=CGRID, alpha=0.4, linewidth=0.6)
+
+        if not hist:
+            return
+
+        # Separar filas de iteración vs filas de tabla de referencia
+        iter_rows = [r for r in hist if r.get("k") not in ("──", "ref", None) and
+                     isinstance(r.get("k"), int)]
+        tabla_ref = getattr(self, '_mo_tabla_ref', [])
+        a_val     = getattr(self, '_mo_alpha', 0.5)
+        x_c       = getattr(self, '_mo_x_c', (lo+hi)/2)
+        f1_call   = getattr(self, '_mo_f1_call', None)
+        f2_call   = getattr(self, '_mo_f2_call', None)
+
+        # ── CANVAS 2D ─────────────────────────────────────────────────────────
+        if self.canvas2d and hasattr(self.canvas2d, "fig"):
+            try:
+                self.lbl_2d.setVisible(False); self.canvas2d.setVisible(True)
+                fig = self.canvas2d.fig; fig.clear()
+                fig.patch.set_facecolor(BG)
+
+                # ── BISECCIÓN o SECCIÓN DORADA ────────────────────────────────
+                if metodo in ("MO — Bisección", "MO — Sección Dorada"):
+                    x_vals = np.array([r.get("x_k", float("nan")) for r in iter_rows])
+                    f_vals = np.array([r.get("φ(x_k,α)", float("nan")) for r in iter_rows])
+                    f1_vals= np.array([r.get("f₁(x_k)", float("nan")) for r in iter_rows])
+                    f2_vals= np.array([r.get("f₂(x_k)", float("nan")) for r in iter_rows])
+                    b_a    = np.array([r.get("b−a",     float("nan")) for r in iter_rows])
+                    algo   = "Bisección" if "Bisección" in metodo else "Sección Dorada"
+
+                    # Sub-gráfica izq: φ(x,α) + trayectoria del algoritmo
+                    ax1 = fig.add_subplot(121); _sax(ax1)
+                    if f1_call is not None:
+                        xg  = np.linspace(lo, hi, 400)
+                        try:
+                            f1g = np.array([float(f1_call(xv)) for xv in xg])
+                            f2g = np.array([(float(xv)-x_c)**2 for xv in xg])
+                            yg  = a_val*f1g + (1-a_val)*f2g
+                            ax1.plot(xg, yg, color=CC, lw=2.2, zorder=2,
+                                     label=f"φ(x,α={a_val:.2f}) = α·f₁+(1-α)·f₂")
+                            ax1.plot(xg, f1g, color="#8080ff", lw=1.2,
+                                     linestyle="--", alpha=0.6, zorder=2,
+                                     label="f₁(x)  (mono-objetivo original)")
+                            ax1.plot(xg, f2g, color="#ff80a0", lw=1.2,
+                                     linestyle=":", alpha=0.6, zorder=2,
+                                     label=f"f₂(x)=(x−{x_c:.1f})²  (objetivo auxiliar)")
+                        except Exception:
+                            pass
+
+                    if x_vals.size > 0 and not np.all(np.isnan(x_vals)):
+                        ax1.plot(x_vals, f_vals, "o-", color=CT, lw=1.8, markersize=5,
+                                 label=f"Iteraciones {algo}", zorder=4)
+                        ax1.plot(x_vals[0],  f_vals[0],  "o",  color="#00e5ff",
+                                 markersize=10, label=f"x₀={x_vals[0]:.3f}", zorder=6)
+                        ax1.plot(x_vals[-1], f_vals[-1], "D",  color=CM,
+                                 markersize=10, label=f"x*={x_vals[-1]:.5f}", zorder=7)
+                        ax1.axvline(x_vals[-1], color=CM, lw=0.8,
+                                    linestyle=":", alpha=0.5)
+                    ax1.set_xlabel("x"); ax1.set_ylabel("f(x)")
+                    ax1.set_title(
+                        f"Función Escalarizada  φ(x,α={a_val:.2f})\n"
+                        f"f(x) mono-obj → Problema MO → {algo}",
+                        fontsize=8, pad=6)
+                    ax1.legend(facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=6.5, framealpha=0.88)
+
+                    # Sub-gráfica der: espacio objetivo f₁ vs f₂ + frente Pareto ref
+                    ax2 = fig.add_subplot(122); _sax(ax2)
+                    # Frente de Pareto de referencia (tabla)
+                    if tabla_ref:
+                        f1r = [r.get("f₁(x*)","") for r in tabla_ref]
+                        f2r = [r.get("f₂(x*)","") for r in tabla_ref]
+                        alr = [r.get("α","") for r in tabla_ref]
+                        try:
+                            f1r_f = [float(v) for v in f1r]
+                            f2r_f = [float(v) for v in f2r]
+                            ax2.plot(f1r_f, f2r_f, "s--", color=C2, lw=1.5,
+                                     markersize=7, zorder=3,
+                                     label="Tabla ref. α (Frente Pareto)")
+                            for i, albl in enumerate(alr):
+                                ax2.annotate(f"α={albl}",
+                                             xy=(f1r_f[i], f2r_f[i]),
+                                             xytext=(f1r_f[i]+0.02, f2r_f[i]+0.02),
+                                             color="#90ff90", fontsize=6.5)
+                        except Exception:
+                            pass
+                    # Punto óptimo actual (α fijo)
+                    if x_vals.size > 0 and f1_call is not None:
+                        try:
+                            xopt = float(x_vals[-1])
+                            f1opt= float(f1_call(xopt))
+                            f2opt= float((xopt-x_c)**2)
+                            ax2.scatter([f1opt], [f2opt], color=CM, s=100,
+                                        zorder=7,
+                                        label=f"Sol. α={a_val:.2f}  x*={xopt:.4f}")
+                        except Exception:
+                            pass
+                    ax2.set_xlabel("f₁(x)"); ax2.set_ylabel("f₂(x)")
+                    ax2.set_title(
+                        "Espacio Objetivo\n(Tabla α = referencia Frente Pareto)",
+                        fontsize=8, pad=6)
+                    ax2.legend(facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=6.5, framealpha=0.88)
+
+                # ── FRENTE DE PARETO ──────────────────────────────────────────
+                elif metodo == "MO — Frente de Pareto":
+                    f1v = np.array([r.get("f1(x*)", float("nan")) for r in hist])
+                    f2v = np.array([r.get("f2(x*)", float("nan")) for r in hist])
+                    alp = np.array([r.get("α",      float("nan")) for r in hist])
+                    xv  = np.array([r.get("x*(α)",  float("nan")) for r in hist])
+
+                    ax1 = fig.add_subplot(121); _sax(ax1)
+                    valid = ~(np.isnan(f1v)|np.isnan(f2v))
+                    if valid.any():
+                        sc = ax1.scatter(f1v[valid], f2v[valid], c=alp[valid],
+                                         cmap="plasma", s=24, zorder=4,
+                                         edgecolors="none")
+                        cbar = fig.colorbar(sc, ax=ax1, fraction=0.04, pad=0.04)
+                        cbar.ax.tick_params(colors="#7aaaea")
+                        cbar.set_label("α", color="#7aaaea")
+                    ax1.set_xlabel("f₁(x)  [mono-objetivo original]")
+                    ax1.set_ylabel("f₂(x)  [objetivo auxiliar centrado]")
+                    ax1.set_title(
+                        "Frente de Pareto\n"
+
+                        "Cada punto = solución óptima para un α distinto",
+                        fontsize=8, pad=6)
+
+                    ax2 = fig.add_subplot(122); _sax(ax2)
+                    if valid.any():
+                        ax2.plot(alp[valid], f1v[valid], "-", color=CC, lw=2,
+                                 label="f₁(x*(α))")
+                        ax2.plot(alp[valid], f2v[valid], "-", color=CT, lw=2,
+                                 label="f₂(x*(α))")
+                        ax2.plot(alp[valid], xv[valid],  "--", color=CM, lw=1.8,
+                                 label="x*(α)")
+                    ax2.set_xlabel("α"); ax2.set_ylabel("Valor")
+                    ax2.set_title("Variación con α", fontsize=8, pad=6)
+                    ax2.legend(facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=7, framealpha=0.88)
+
+                # ── JACOBIANO ─────────────────────────────────────────────────
+                elif metodo == "MO — Análisis Jacobiano":
+                    xs  = [r.get("x",  0.0) for r in hist]
+                    jf  = [r.get("J_f=f'(x)",  0.0) for r in hist]
+                    jg  = [r.get("J_g=2(x-c)", 0.0) for r in hist]
+                    nJ  = [r.get("‖J‖",  0.0) for r in hist]
+                    p_ok= [r.get("¿Pareto-opt?","") == "✓ Sí" for r in hist]
+
+                    ax1 = fig.add_subplot(121); _sax(ax1)
+                    ax1.plot(xs, jf, "o-", color=CC, lw=2, markersize=6,
+                             label="J[f₁]=f'(x)  (gradiente mono-obj)", zorder=4)
+                    ax1.plot(xs, jg, "s-", color=CT, lw=2, markersize=6,
+                             label="J[f₂]=2(x−c)  (gradiente aux)", zorder=4)
+                    ax1.axhline(0, color="#7aaaea", lw=0.7, linestyle="--", alpha=0.5)
+                    ax1.set_xlabel("x"); ax1.set_ylabel("Componente Jacobiana")
+                    ax1.set_title("Jacobiano J(x) = [f'(x), 2(x−c)]", fontsize=9, pad=6)
+                    ax1.legend(facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=7, framealpha=0.88)
+
+                    ax2 = fig.add_subplot(122); _sax(ax2)
+                    w_ = (xs[-1]-xs[0])/(len(xs)+1)*0.85 if len(xs)>1 else 0.15
+                    colors_bar = [CM if p else "#3060a0" for p in p_ok]
+                    ax2.bar(xs, nJ, width=w_, color=colors_bar, edgecolor="none", zorder=4)
+                    ax2.set_xlabel("x"); ax2.set_ylabel("‖J(x)‖")
+                    ax2.set_title("Norma del Jacobiano  (dorado = Pareto-óptimo)",
+                                  fontsize=9, pad=6)
+                    ax2.legend(handles=[
+                        Patch(facecolor=CM,        label="Pareto-óptimo"),
+                        Patch(facecolor="#3060a0",  label="No Pareto-óptimo"),
+                    ], facecolor="#141e36", edgecolor="#2a3e6e",
+                       labelcolor="#d8e8f8", fontsize=7, framealpha=0.88)
+
+                fig.tight_layout()
+                try: self.canvas2d.draw()
+                except: pass
+            except Exception as e:
+                self.lbl_2d.setText(f"⚠ MO 2D: {e}"); self.lbl_2d.setVisible(True)
+                self.canvas2d.setVisible(False)
+
+        # ── CANVAS 3D: superficie φ(x,α) con curva de Pareto ─────────────────
+        if self.canvas3d and hasattr(self.canvas3d, "fig"):
+            try:
+                self.lbl_3d.setVisible(False); self.canvas3d.setVisible(True)
+                fig3 = self.canvas3d.fig; fig3.clear()
+                fig3.patch.set_facecolor(BG)
+                ax3  = fig3.add_subplot(111, projection="3d")
+                ax3.set_facecolor(BG)
+                for pane in (ax3.xaxis.pane, ax3.yaxis.pane, ax3.zaxis.pane):
+                    pane.fill = False; pane.set_edgecolor("#1a2e58")
+                ax3.tick_params(colors="#7aaaea", labelsize=7)
+
+                xg = np.linspace(lo, hi, 50)
+                ag = np.linspace(0.0, 1.0, 50)
+                X3, A3 = np.meshgrid(xg, ag)
+                if f1_call is not None:
+                    try:
+                        F1_3 = np.vectorize(lambda xv: float(f1_call(xv)))(X3)
+                        F2_3 = (X3 - x_c)**2
+                        Z3   = A3*F1_3 + (1-A3)*F2_3
+                        ax3.plot_surface(X3, A3, Z3, cmap="coolwarm", alpha=0.78,
+                                         linewidth=0, antialiased=True,
+                                         rcount=40, ccount=40)
+                        # Curva Pareto (mínimo de φ para cada α)
+                        a_pf = np.linspace(0,1,120)
+                        # Encontrar x*(α) numéricamente via min en grid
+                        xg_pf = np.linspace(lo, hi, 400)
+                        f1_pf = np.array([float(f1_call(xv)) for xv in xg_pf])
+                        f2_pf = (xg_pf - x_c)**2
+                        x_pf  = []
+                        f_pf  = []
+                        for a_p in a_pf:
+                            z_  = a_p*f1_pf + (1-a_p)*f2_pf
+                            idx = np.argmin(z_)
+                            x_pf.append(xg_pf[idx]); f_pf.append(z_[idx])
+                        ax3.plot(x_pf, a_pf, f_pf, color=CM, lw=3,
+                                 label="Frente de Pareto  x*(α)", zorder=6)
+                        # Marcar punto actual si hay iteraciones
+                        if iter_rows:
+                            xopt = iter_rows[-1].get("x_k", float("nan"))
+                            try:
+                                fopt = a_val*float(f1_call(xopt)) + (1-a_val)*(float(xopt)-x_c)**2
+                                ax3.scatter([xopt],[a_val],[fopt],
+                                            color=C2, s=80, zorder=7,
+                                            label=f"x*(α={a_val:.2f})={xopt:.4f}")
+                            except Exception:
+                                pass
+                    except Exception as e3:
+                        ax3.set_title(f"Error 3D: {e3}", color="#ff8080")
+                ax3.set_xlabel("x"); ax3.set_ylabel("α")
+                ax3.set_zlabel("φ(x,α)")
+                ax3.set_title(
+                    "Superficie φ(x,α) = α·f₁(x)+(1−α)·f₂(x)\n"
+
+                    "(Escalarización del problema MO)",
+                    fontsize=8, color="#d8e8f8", pad=10)
+                _h3, _l3 = ax3.get_legend_handles_labels()
+                if _h3:
+                    ax3.legend(_h3, _l3, facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=7,
+                               loc="upper left", framealpha=0.88)
+                ax3.view_init(elev=28, azim=-55)
+                fig3.tight_layout()
+                try: self.canvas3d.draw()
+                except: pass
+
+                self._rot_angle = -55
+                if hasattr(self,"_rot_timer") and self._rot_timer:
+                    try: self._rot_timer.stop()
+                    except: pass
+                self._rot_ax3 = ax3; self._rot_canvas = self.canvas3d
+                self._rot_timer = QtCore.QTimer(self)
+                def _rotate():
+                    self._rot_angle = (self._rot_angle+0.8)%360
+                    try: self._rot_ax3.view_init(elev=28,azim=self._rot_angle); self._rot_canvas.draw_idle()
+                    except: self._rot_timer.stop()
+                self._rot_timer.timeout.connect(_rotate)
+                self._rot_timer.start(40)
+            except Exception as e:
+                self.lbl_3d.setText(f"⚠ MO 3D: {e}"); self.lbl_3d.setVisible(True)
+                self.canvas3d.setVisible(False)
 
     def _traj(self, vars_, hist, x0):
         """Extrae trayectoria de puntos del historial, compatible con arrays numpy."""
@@ -2119,7 +3741,10 @@ class InterfazOptimizacion(QMW):
 
             ax.set_title(f"2D — {metod}", fontsize=11, pad=8)
             ax.legend(facecolor="#141e36", edgecolor="#2a3e6e",
-                      labelcolor="#d8e8f8", fontsize=8, loc="best")
+                      labelcolor="#d8e8f8", fontsize=8,
+                      loc="upper left",
+                      ncol=1, framealpha=0.88,
+                      borderaxespad=0.5)
             fig2.tight_layout()
             f2 = tempfile.NamedTemporaryFile(suffix=".png", delete=False); f2.close()
             fig2.savefig(f2.name, dpi=130, bbox_inches="tight", facecolor=BG)
@@ -2166,8 +3791,16 @@ class InterfazOptimizacion(QMW):
                 lbl_azim = {-55:"Vista Frontal", 30:"Vista Lateral", 110:"Vista Superior"}
                 ax3.set_title(f"3D — {metod}  ({lbl_azim.get(azim,'')})",
                               fontsize=10, color="#d8e8f8", pad=10)
-                ax3.legend(facecolor="#141e36", edgecolor="#2a3e6e",
-                           labelcolor="#d8e8f8", fontsize=8)
+                _h3, _l3 = ax3.get_legend_handles_labels()
+                if _h3:
+                    fig3.legend(_h3, _l3,
+                               facecolor="#141e36", edgecolor="#2a3e6e",
+                               labelcolor="#d8e8f8", fontsize=8,
+                               loc="upper left",
+                               bbox_to_anchor=(0.02, 0.97),
+                               bbox_transform=fig3.transFigure,
+                               ncol=1, framealpha=0.88,
+                               borderaxespad=0.5)
                 ax3.view_init(elev=28, azim=azim)
                 fig3.tight_layout()
                 f3 = tempfile.NamedTemporaryFile(suffix=".png", delete=False); f3.close()
@@ -2358,6 +3991,125 @@ class InterfazOptimizacion(QMW):
         return justificaciones.get(metodo,
             f"El método {metodo} fue aplicado a f(x) = {fx} como técnica de optimización "
             "numérica para encontrar el mínimo o máximo de la función en el dominio dado.")
+
+    @staticmethod
+    def _math_to_unicode(text: str) -> str:
+        """
+        Convierte notación matemática a superíndices/subíndices Unicode.
+        Usado para celdas de Excel donde no hay HTML.
+        """
+        SUP_MAP = str.maketrans(
+            "0123456789+-=()",
+            "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾"
+        )
+        SUB_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+        def _sup(m):
+            exp = m.group(2).strip("{}")
+            return m.group(1) + exp.translate(SUP_MAP)
+
+        def _sub(m):
+            idx = m.group(2).strip("{}")
+            return m.group(1) + idx.translate(SUB_MAP)
+
+        import re as _re
+        # x**{k+1}, x**2
+        text = _re.sub(r'([a-zA-Z\u03b1-\u03c9\)\]])\*\*(\{[^}]+\}|-?\d+)', _sup, text)
+        # x^{n}, x^2
+        text = _re.sub(r'([a-zA-Z\u03b1-\u03c9\)\]])\^(\{[^}]+\}|-?\d+)', _sup, text)
+        # x_{k+1}, x_k  (solo dígitos para subscript unicode)
+        text = _re.sub(r'([a-zA-Z\u03b1-\u03c9])_\{(\d+)\}', _sub, text)
+        text = _re.sub(r'([a-zA-Z\u03b1-\u03c9])_(\d+)',     _sub, text)
+        # Fracciones comunes
+        for raw, uni in [("1/2","½"),("1/3","⅓"),("1/4","¼"),
+                         ("2/3","⅔"),("3/4","¾"),("1/8","⅛")]:
+            text = text.replace(raw, uni)
+        return text
+
+    @staticmethod
+    def _math_to_reportlab(text: str) -> str:
+        """
+        Convierte notación matemática a etiquetas XML de ReportLab
+        (<super>, <sub>) para usar dentro de Paragraph().
+        Aplica html.escape primero para proteger < y >.
+        """
+        import html as _hl
+        import re as _re
+
+        s = _hl.escape(text)
+
+        # Superíndices: x**{k+1}, x**2, x^{n}, x^2
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9\u2207\)\]])\*\*\{([^}]+)\}',
+                    lambda m: f"{m.group(1)}<super>{m.group(2)}</super>", s)
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9\u2207\)\]])\*\*(-?\d+(?:\.\d+)?)',
+                    lambda m: f"{m.group(1)}<super>{m.group(2)}</super>", s)
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9\)\]])\^\{([^}]+)\}',
+                    lambda m: f"{m.group(1)}<super>{m.group(2)}</super>", s)
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9\)\]])\^(-?\d+)',
+                    lambda m: f"{m.group(1)}<super>{m.group(2)}</super>", s)
+        # Subíndices: x_{k+1}, x_k
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9])_\{([^}]+)\}',
+                    lambda m: f"{m.group(1)}<sub>{m.group(2)}</sub>", s)
+        s = _re.sub(r'([a-zA-Z\u03b1-\u03c9\u0391-\u03a9])_([a-zA-Z0-9\+\-\*]+)',
+                    lambda m: f"{m.group(1)}<sub>{m.group(2)}</sub>", s)
+        # Fracciones comunes
+        for raw, uni in [("1/2","½"),("1/3","⅓"),("1/4","¼"),
+                         ("2/3","⅔"),("3/4","¾"),("1/8","⅛")]:
+            s = s.replace(raw, uni)
+        return s
+
+    @staticmethod
+    def _render_math_img_file(expr: str,
+                               fontsize: float = 11,
+                               fg: str = '#1a1a3a',
+                               dpi: int = 150) -> 'str | None':
+        """
+        Renderiza una expresión mathtext a un archivo PNG temporal.
+        Retorna la ruta del archivo o None si matplotlib no está disponible.
+        Usado para incrustar fórmulas en PDF y Excel.
+        """
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import tempfile, os
+            import re as _re2
+
+            # ── Convertir a mathtext ($...$) ──────────────────────────────
+            s = expr.strip()
+            UNI = {
+                'α':r'\alpha','β':r'\beta','γ':r'\gamma','δ':r'\delta',
+                'λ':r'\lambda','μ':r'\mu','σ':r'\sigma','ω':r'\omega',
+                '∇':r'\nabla','∂':r'\partial','∞':r'\infty',
+                '≤':r'\leq','≥':r'\geq','≠':r'\neq',
+                '·':r'\cdot','×':r'\times','±':r'\pm','‖':r'\|',
+            }
+            for uc, lt in UNI.items():
+                s = s.replace(uc, lt)
+            # Potencias
+            s = _re2.sub(r'([a-zA-Z0-9\)\|])\*\*\{([^}]+)\}', r'\1^{\2}', s)
+            s = _re2.sub(r'([a-zA-Z0-9\)\|])\*\*(-?\d+)',      r'\1^{\2}', s)
+            # Multiplicación
+            s = _re2.sub(r'(?<!\^)(?<!\{)\*(?!\*)(?!\{)', r' \\cdot ', s)
+            # exp / sqrt / fracciones
+            s = _re2.sub(r'exp\(([^)]+)\)',  r'e^{\1}',        s)
+            s = _re2.sub(r'sqrt\(([^)]+)\)', r'\\sqrt{\1}',    s)
+            s = _re2.sub(r'\b(\d+)/(\d+)\b', r'\\frac{\1}{\2}', s)
+
+            mathtext = f'${s}$'
+
+            fig = plt.figure(figsize=(0.01, 0.01))
+            fig.patch.set_facecolor('#e8f2ff')
+            fig.text(0.5, 0.5, mathtext, fontsize=fontsize,
+                     color=fg, ha='center', va='center')
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp.close()
+            fig.savefig(tmp.name, format='png', dpi=dpi,
+                        bbox_inches='tight', pad_inches=0.12)
+            plt.close(fig)
+            return tmp.name
+        except Exception:
+            return None
 
     @staticmethod
     def _build_step_by_step(entry: dict) -> list:
@@ -2598,13 +4350,28 @@ class InterfazOptimizacion(QMW):
 
     def _nodata(self): QMsgBox.information(self,"Exportar","No hay datos.")
 
-    def export_csv(self):
+    def export_csv_db(self):
+        """
+        Exporta 3 CSV normalizados + script SQL compatibles con:
+        PostgreSQL, MySQL, SQLite, MariaDB, SQL Server, Oracle,
+        DBeaver, pgAdmin, DataGrip, TablePlus, etc.
+
+        Archivos generados (en la carpeta que elija el usuario):
+          reporte_sesion.csv       — una fila por método ejecutado
+          reporte_iteraciones.csv  — una fila por iteración
+          reporte_historial.csv    — historial de funciones de la sesión
+          crear_tablas.sql         — script CREATE TABLE + comandos COPY
+        """
         if self.table.rowCount() == 0:
             return self._nodata()
-        p, _ = QFD.getSaveFileName(self, "Guardar CSV", "reporte.csv", "CSV (*.csv)")
-        if not p:
+
+        folder = QFD.getExistingDirectory(self, "Seleccionar carpeta de destino para los CSV")
+        if not folder:
             return
+
         try:
+            import datetime, math, re, os
+
             session = self._session if self._session else [{
                 "metodo": self._metodo, "fx": self._fx, "gx": "",
                 "vars": list(self._vars), "x0": list(self._x0),
@@ -2612,130 +4379,227 @@ class InterfazOptimizacion(QMW):
                 "hist": self._hist,
                 "traj": self._traj(self._vars, self._hist, self._x0),
             }]
-            fx_global = session[0]["fx"] if session else self._fx
 
-            def _fv(v):
-                if v is None: return ""
+            def _sql_col(name: str) -> str:
+                """Nombre SQL-safe: minúsculas, sin tildes, solo a-z0-9_."""
+                t = name.lower().strip()
+                t = t.replace("á","a").replace("é","e").replace("í","i")\
+                     .replace("ó","o").replace("ú","u").replace("ñ","n")
+                t = re.sub(r"[^a-z0-9_]", "_", t).strip("_")
+                return t or "col"
+
+            timestamp_export = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            def _num(v):
+                """Devuelve float limpio como string, o None — nunca NaN/Inf/string vacío con comillas."""
+                if v is None:
+                    return None
                 if isinstance(v, np.ndarray):
-                    return "[" + ", ".join(f"{x:.6g}" for x in v.flat) + "]"
-                try:    return f"{float(v):.8g}"
-                except: return str(v)
-
-            total_iter = sum(len(s.get("hist") or []) for s in session)
-
-            with open(p, "w", newline="", encoding="utf-8-sig") as fh:
-                w = csv.writer(fh)
-
-                # ══════════════════════════════════════════════════════════════
-                # SECCIÓN 1 — RESUMEN GENERAL
-                # ══════════════════════════════════════════════════════════════
-                w.writerow(["## RESUMEN GENERAL"])
-                w.writerow(["Campo", "Valor"])
-                w.writerow(["Función analizada",    fx_global])
-                w.writerow(["Tipo de función",      self._classify_function(fx_global)])
-                w.writerow(["Variables",            ", ".join(session[0]["vars"])])
-                w.writerow(["Intervalo",            f"[{session[0]['lo']:.4g}, {session[0]['hi']:.4g}]"])
-                w.writerow(["Total métodos",        len(session)])
-                w.writerow(["Total iteraciones",    total_iter])
-                w.writerow(["Métodos aplicados",    ", ".join(s["metodo"] for s in session)])
-                w.writerow([])
-
-                # Descripción de la función
-                w.writerow(["## DESCRIPCIÓN DE LA FUNCIÓN"])
-                w.writerow(["Descripción", self._describe_function(fx_global)])
-                w.writerow([])
-
-                # Tipos de estudio aplicables
-                w.writerow(["## TIPOS DE ESTUDIO APLICABLES"])
-                w.writerow(["Descripción", self._describe_applicable_studies(fx_global)])
-                w.writerow([])
-
-                # ══════════════════════════════════════════════════════════════
-                # SECCIÓN 2 — DETALLE POR MÉTODO
-                # ══════════════════════════════════════════════════════════════
-                for idx_s, entry in enumerate(session, 1):
-                    metodo = entry["metodo"]
-                    hist   = entry.get("hist") or []
-                    fx     = entry["fx"]
-                    lo     = entry["lo"]
-                    hi     = entry["hi"]
-                    x0     = entry.get("x0", [])
-                    vars_  = entry.get("vars", [])
-
-                    # ── Encabezado del método ─────────────────────────────────
-                    w.writerow([f"## MÉTODO {idx_s}: {metodo}"])
-                    w.writerow(["Campo",           "Valor"])
-                    w.writerow(["Método",          metodo])
-                    w.writerow(["Función",         fx])
-                    w.writerow(["Tipo de estudio", self._classify_study(metodo)])
-                    w.writerow(["Variables",       ", ".join(vars_)])
-                    w.writerow(["Intervalo",       f"[{lo:.4g}, {hi:.4g}]"])
-                    x0_str = ("[" + ", ".join(f"{v:.4g}" for v in x0) + "]") if x0 else "N/A"
-                    w.writerow(["Punto inicial",   x0_str])
-                    w.writerow(["Justificación",   self._justify_method(metodo, fx)])
-                    w.writerow([])
-
-                    # ── Resumen de resultados ─────────────────────────────────
-                    w.writerow([f"### RESUMEN DE RESULTADOS — {metodo}"])
-                    if hist:
-                        last = hist[-1]
-                        x_opt = f_opt = iter_val = ""
-                        for kx in ("x_k", "x", "lambda_k"):
-                            if kx in last:
-                                x_opt = _fv(last[kx]); break
-                        for kf in ("f_k", "f(x)", "f_new", "f_lambda"):
-                            if kf in last:
-                                f_opt = _fv(last[kf]); break
-                        iter_val = len(hist)
-                        w.writerow(["x_opt",  x_opt])
-                        w.writerow(["f_opt",  f_opt])
-                        w.writerow(["iter",   iter_val])
+                    flat = v.flatten()
+                    if flat.size == 1:
+                        v = float(flat[0])
                     else:
-                        w.writerow(["Sin datos de iteración", ""])
-                    w.writerow([])
+                        return None
+                try:
+                    f = float(v)
+                    if math.isnan(f) or math.isinf(f):
+                        return None
+                    return f"{f:.10g}"
+                except Exception:
+                    return None
 
-                    # ── Tabla de iteraciones completa ─────────────────────────
-                    w.writerow([f"### TABLA DE ITERACIONES — {metodo}"])
-                    if hist:
-                        # Recoger todas las columnas
-                        h_cols: list = []
-                        for rec in hist:
-                            for k in rec:
-                                if k not in h_cols:
-                                    h_cols.append(k)
-                        w.writerow(h_cols)
-                        for rec in hist:
-                            row_v = []
-                            for col in h_cols:
-                                v = rec.get(col, "")
-                                row_v.append(_fv(v) if v != "" else "")
-                            w.writerow(row_v)
-                    else:
-                        w.writerow(["Sin datos de iteración"])
-                    w.writerow([])
+            def _txt(v):
+                """Devuelve texto limpio o cadena vacía."""
+                if v is None:
+                    return ""
+                return str(v)
 
-                    # ── Cálculos paso a paso ──────────────────────────────────
-                    w.writerow([f"### CÁLCULOS PASO A PASO — {metodo}"])
-                    steps = self._build_step_by_step(entry)
-                    for step_title, step_body in steps:
-                        w.writerow([f"# {step_title}"])
-                        for line in step_body.split("\n"):
-                            if line.strip():
-                                w.writerow([line.strip()])
-                    w.writerow([])
+            def _csv_writer(path):
+                """CSV con comillas solo en campos de texto, numéricos sin comillas — compatible PostgreSQL."""
+                fh = open(path, "w", newline="", encoding="utf-8")
+                w = csv.writer(fh, delimiter=",",
+                               quoting=csv.QUOTE_MINIMAL,
+                               lineterminator="\r\n")
+                return fh, w
 
-                # ══════════════════════════════════════════════════════════════
-                # SECCIÓN 3 — CONCLUSIÓN GENERAL
-                # ══════════════════════════════════════════════════════════════
-                w.writerow(["## CONCLUSIÓN GENERAL"])
-                conclusion = self._build_conclusion(session, fx_global)
-                w.writerow(["Conclusión", conclusion])
-                w.writerow([])
+            # ═══════════════════════════════════════════════════════════════════
+            # TABLA 1 — reporte_sesion
+            # ═══════════════════════════════════════════════════════════════════
+            p_sesion = os.path.join(folder, "reporte_sesion.csv")
+            fh1, w1 = _csv_writer(p_sesion)
+            w1.writerow([
+                "metodo_id", "metodo", "funcion_fx", "variables",
+                "intervalo_min", "intervalo_max", "punto_inicial",
+                "total_iteraciones", "x_optimo", "f_optimo",
+                "tipo_estudio", "exportado_en"
+            ])
+            for idx, entry in enumerate(session, 1):
+                hist  = entry.get("hist") or []
+                vars_ = entry.get("vars", [])
+                x0    = entry.get("x0", [])
+                x_opt = f_opt = None
+                if hist:
+                    last = hist[-1]
+                    for kx in ("x_k","x","lambda_k","mu_k","x1"):
+                        if kx in last:
+                            x_opt = _num(last[kx]); break
+                    for kf in ("f_k","f(x)","f_new","f_lambda","f_mu","fx"):
+                        if kf in last:
+                            f_opt = _num(last[kf]); break
+                x0_str = ";".join(str(v) for v in x0) if x0 else ""
+                w1.writerow([
+                    idx,
+                    _txt(entry["metodo"]),
+                    _txt(entry["fx"]),
+                    _txt(";".join(vars_)),
+                    _num(entry.get("lo")),
+                    _num(entry.get("hi")),
+                    x0_str,
+                    len(hist),
+                    x_opt,
+                    f_opt,
+                    _txt(self._classify_study(entry["metodo"])),
+                    timestamp_export,
+                ])
+            fh1.close()
 
-            total_rows = sum(len(s.get("hist") or []) for s in session)
+            # ═══════════════════════════════════════════════════════════════════
+            # TABLA 2 — reporte_iteraciones
+            # ═══════════════════════════════════════════════════════════════════
+            # Recolectar columnas únicas de todos los registros de todas las iteraciones
+            orig_cols: list = []       # nombres originales
+            for entry in session:
+                for rec in (entry.get("hist") or []):
+                    for k in rec:
+                        if k not in orig_cols:
+                            orig_cols.append(k)
+
+            sql_cols = [_sql_col(k) for k in orig_cols]
+
+            p_iter = os.path.join(folder, "reporte_iteraciones.csv")
+            fh2, w2 = _csv_writer(p_iter)
+            w2.writerow(["metodo_id", "metodo", "funcion_fx", "iteracion"] + sql_cols)
+            for idx, entry in enumerate(session, 1):
+                for i, rec in enumerate(entry.get("hist") or []):
+                    row = [idx, _txt(entry["metodo"]), _txt(entry["fx"]), i]
+                    for ok in orig_cols:
+                        row.append(_num(rec.get(ok)))
+                    w2.writerow(row)
+            fh2.close()
+
+            # ═══════════════════════════════════════════════════════════════════
+            # TABLA 3 — reporte_historial
+            # ═══════════════════════════════════════════════════════════════════
+            p_hist = os.path.join(folder, "reporte_historial.csv")
+            fh3, w3 = _csv_writer(p_hist)
+            w3.writerow(["hora","funcion_fx","metodo","iteraciones","x_optimo","f_optimo"])
+            for i, e in enumerate(self._history_log, 1):
+                w3.writerow([
+                    _txt(e.get("timestamp","")),
+                    _txt(e.get("fx","")),
+                    _txt(e.get("metodo","")),
+                    e.get("iters") or None,
+                    _num(e.get("xopt")),
+                    _num(e.get("fopt")),
+                ])
+            fh3.close()
+
+            # ═══════════════════════════════════════════════════════════════════
+            # ═══════════════════════════════════════════════════════════════════
+            # SCRIPT SQL — CREATE TABLE
+            # ═══════════════════════════════════════════════════════════════════
+            p_sql = os.path.join(folder, "crear_tablas.sql")
+            folder_sql = folder.replace("\\", "/")
+            iter_cols_ddl = "\n".join(
+                f"    {c:<24} DOUBLE PRECISION," for c in sql_cols
+            )
+            with open(p_sql, "w", encoding="utf-8") as fs:
+                fs.write(f"-- Generado por Optimizador de Funciones  |  {timestamp_export}\n")
+                fs.write("-- PASO 1: Ejecuta este archivo en pgAdmin Query Tool para crear las tablas.\n")
+                fs.write("-- PASO 2: Usa importar_datos.sql para cargar los CSV.\n\n")
+                fs.write(
+                    "CREATE TABLE IF NOT EXISTS reporte_sesion (\n"
+                    "    metodo_id         SERIAL          PRIMARY KEY,\n"
+                    "    metodo            VARCHAR(120),\n"
+                    "    funcion_fx        TEXT,\n"
+                    "    variables         TEXT,\n"
+                    "    intervalo_min     DOUBLE PRECISION,\n"
+                    "    intervalo_max     DOUBLE PRECISION,\n"
+                    "    punto_inicial     TEXT,\n"
+                    "    total_iteraciones INTEGER,\n"
+                    "    x_optimo          DOUBLE PRECISION,\n"
+                    "    f_optimo          DOUBLE PRECISION,\n"
+                    "    tipo_estudio      VARCHAR(120),\n"
+                    "    exportado_en      TIMESTAMP\n"
+                    ");\n\n"
+                )
+                fs.write(
+                    "CREATE TABLE IF NOT EXISTS reporte_iteraciones (\n"
+                    "    id                SERIAL          PRIMARY KEY,\n"
+                    "    metodo_id         INTEGER         REFERENCES reporte_sesion(metodo_id),\n"
+                    "    metodo            VARCHAR(120),\n"
+                    "    funcion_fx        TEXT,\n"
+                    "    iteracion         INTEGER,\n"
+                )
+                fs.write(iter_cols_ddl + "\n")
+                fs.write(
+                    "    _dummy            BOOLEAN DEFAULT NULL\n"
+                    ");\n\n"
+                )
+                fs.write(
+                    "CREATE TABLE IF NOT EXISTS reporte_historial (\n"
+                    "    id                SERIAL          PRIMARY KEY,\n"
+                    "    hora              VARCHAR(20),\n"
+                    "    funcion_fx        TEXT,\n"
+                    "    metodo            VARCHAR(120),\n"
+                    "    iteraciones       INTEGER,\n"
+                    "    x_optimo          DOUBLE PRECISION,\n"
+                    "    f_optimo          DOUBLE PRECISION\n"
+                    ");\n"
+                )
+
+            # SCRIPT SEPARADO — solo importación (COPY server-side para pgAdmin)
+            p_import = os.path.join(folder, "importar_datos.sql")
+            with open(p_import, "w", encoding="utf-8") as fi:
+                fi.write(f"-- Importar datos  |  {timestamp_export}\n")
+                fi.write("-- Ejecuta cada linea POR SEPARADO en pgAdmin Query Tool.\n")
+                fi.write("-- El servidor PostgreSQL debe poder leer la ruta indicada.\n")
+                fi.write("-- Si usas PostgreSQL local en Windows, la ruta debe ser con barras /\n\n")
+                # Columnas explícitas para reporte_sesion (excluye 'id' SERIAL)
+                sesion_cols = (
+                    "metodo_id, metodo, funcion_fx, variables, intervalo_min, "
+                    "intervalo_max, punto_inicial, total_iteraciones, x_optimo, "
+                    "f_optimo, tipo_estudio, exportado_en"
+                )
+                # Columnas explícitas para reporte_iteraciones (excluye 'id' SERIAL y '_dummy')
+                iter_copy_cols = ", ".join(
+                    ["metodo_id", "metodo", "funcion_fx", "iteracion"] + sql_cols
+                )
+                fi.write(
+                    f"COPY reporte_sesion({sesion_cols})\n"
+                    f"  FROM '{folder_sql}/reporte_sesion.csv'\n"
+                    f"  WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',', ENCODING 'UTF8');\n\n"
+                )
+                fi.write(
+                    f"COPY reporte_iteraciones({iter_copy_cols})\n"
+                    f"  FROM '{folder_sql}/reporte_iteraciones.csv'\n"
+                    f"  WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',', ENCODING 'UTF8');\n\n"
+                )
+                fi.write(
+                    f"COPY reporte_historial(hora, funcion_fx, metodo, iteraciones, x_optimo, f_optimo)\n"
+                    f"  FROM '{folder_sql}/reporte_historial.csv'\n"
+                    f"  WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',', ENCODING 'UTF8');\n\n"
+                    "-- ALTERNATIVA: si prefieres usar la interfaz grafica de pgAdmin:\n"
+                    "--   Click derecho en la tabla > Import/Export Data\n"
+                    "--   Format: csv  |  Header: ON  |  Delimiter: ,  |  Encoding: UTF8\n"
+                )
+
+            n_iter = sum(len(s.get("hist") or []) for s in session)
             self._show_export_success(
-                "CSV", p,
-                f"{len(session)} método(s) · {total_rows} iteración(es) en total")
+                "CSV", folder,
+                f"3 CSV + crear_tablas.sql + importar_datos.sql  ·  {len(session)} método(s)  ·  {n_iter} iteración(es)"
+            )
+
         except Exception as e:
             _err(self, "Error al exportar CSV", str(e), traceback.format_exc())
 
@@ -3103,7 +4967,7 @@ class InterfazOptimizacion(QMW):
                 steps = self._build_step_by_step(entry)
                 for step_title, step_body in steps:
                     ws_m.row_dimensions[r_m].height = 16
-                    ct = ws_m.cell(row=r_m, column=2, value=step_title)
+                    ct = ws_m.cell(row=r_m, column=2, value=self._math_to_unicode(step_title))
                     ct.font = _font(bold=True, size=10, color=C["fg_gold"])
                     ct.fill = _fill(C["bg_head"]); ct.alignment = _left()
                     ct.border = _border()
@@ -3113,7 +4977,8 @@ class InterfazOptimizacion(QMW):
                         if not line.strip():
                             continue
                         ws_m.row_dimensions[r_m].height = 14
-                        cb = ws_m.cell(row=r_m, column=2, value=line.strip())
+                        cb = ws_m.cell(row=r_m, column=2,
+                                       value=self._math_to_unicode(line.strip()))
                         cb.font = _font(size=9)
                         cb.fill = _fill(C["bg_resumen"])
                         cb.alignment = Alignment(horizontal="left", vertical="center",
@@ -3312,11 +5177,12 @@ class InterfazOptimizacion(QMW):
                 return t
 
             def _step_box(title, body_lines):
-                """Caja de paso de cálculo."""
-                rows = [[Paragraph(title, sStep)]]
+                """Caja de paso con super/subíndices via ReportLab (sin imágenes)."""
+                rows = [[Paragraph(self._math_to_reportlab(title), sStep)]]
                 for line in body_lines:
                     if line.strip():
-                        rows.append([Paragraph(line.strip(), sStepBd)])
+                        rows.append([Paragraph(
+                            self._math_to_reportlab(line.strip()), sStepBd)])
                 t = Table(rows, colWidths=[PW])
                 t.setStyle(TableStyle([
                     ("BACKGROUND",    (0,0), (0,0),  cHead2),
@@ -3466,7 +5332,9 @@ class InterfazOptimizacion(QMW):
             for i, s in enumerate(session, 1):
                 justif = self._justify_method(s["metodo"], fx_global)
                 elems.append(Spacer(1, 0.15*cm))
-                elems.append(_method_box_w(i, s["metodo"], justif))
+                # KeepTogether: el encabezado azul y el cuerpo blanco
+                # nunca se separan entre páginas
+                elems.append(KeepTogether([_method_box_w(i, s["metodo"], justif)]))
 
             elems.append(Spacer(1, 0.15*cm))
             elems.append(_HR_w(0.5))
@@ -3481,29 +5349,26 @@ class InterfazOptimizacion(QMW):
                 hist   = entry["hist"]
                 elems.append(PageBreak())
 
-                # Banner del método
-                elems.append(_banner(
-                    f"Método {idx_s}: {metodo}",
-                    f"f(x) = {entry['fx']}"))
-                elems.append(Spacer(1, 0.2*cm))
-
-                # ── Info del método ────────────────────────────────────────────
+                # Banner del método + Info: se mantienen juntos en la misma página
                 tipo_est = self._classify_study(metodo)
-                elems.append(_HR(1.0, cBlue))
-                elems.append(Paragraph("Información del Método", sSecHdr))
-                elems.append(_section_box([
-                    [Paragraph("Método:", sLabel),        Paragraph(metodo, sVal)],
-                    [Paragraph("Función:", sLabel),       Paragraph(entry["fx"], sVal)],
-                    [Paragraph("Tipo de estudio:", sLabel), Paragraph(tipo_est, sVal)],
-                    [Paragraph("Variables:", sLabel),     Paragraph(", ".join(entry["vars"]), sVal)],
-                    [Paragraph("Intervalo:", sLabel),     Paragraph(f"[{entry['lo']:.4g},  {entry['hi']:.4g}]", sVal)],
+                elems.append(KeepTogether([
+                    _banner(
+                        f"Método {idx_s}: {metodo}",
+                        f"f(x) = {entry['fx']}"),
+                    Spacer(1, 0.2*cm),
+                    _HR(1.0, cBlue),
+                    Paragraph("Información del Método", sSecHdr),
+                    _section_box([
+                        [Paragraph("Método:", sLabel),          Paragraph(metodo, sVal)],
+                        [Paragraph("Función:", sLabel),         Paragraph(entry["fx"], sVal)],
+                        [Paragraph("Tipo de estudio:", sLabel), Paragraph(tipo_est, sVal)],
+                        [Paragraph("Variables:", sLabel),       Paragraph(", ".join(entry["vars"]), sVal)],
+                        [Paragraph("Intervalo:", sLabel),       Paragraph(f"[{entry['lo']:.4g},  {entry['hi']:.4g}]", sVal)],
+                    ]),
+                    Spacer(1, 0.2*cm),
                 ]))
-                elems.append(Spacer(1, 0.2*cm))
 
                 # ── Tabla de iteraciones ───────────────────────────────────────
-                elems.append(_HR(1.0, cBlue))
-                elems.append(Paragraph("Tabla de Iteraciones", sSecHdr))
-
                 if hist:
                     h_cols: list = []
                     for rec in hist:
@@ -3546,7 +5411,7 @@ class InterfazOptimizacion(QMW):
                                  textColor=cWhite, alignment=TA_CENTER)
                     cel_st = _PS(f"td{idx_s}", fontSize=7, textColor=cWhite,
                                  alignment=TA_CENTER, leading=10)
-                    cel_alt= _PS(f"ta{idx_s}", fontSize=7, textColor=cDkTxt,
+                    cel_alt= _PS(f"ta{idx_s}", fontSize=7, textColor=cWhite,
                                  alignment=TA_CENTER, leading=10)
 
                     tbl_data = [[Paragraph(c, hdr_st) for c in h_cols]]
@@ -3554,44 +5419,84 @@ class InterfazOptimizacion(QMW):
                         st = cel_alt if i_r % 2 == 1 else cel_st
                         tbl_data.append([Paragraph(v, st) for v in row_v])
 
-                    tbl = Table(tbl_data, colWidths=col_widths, repeatRows=1)
-                    tbl.setStyle(TableStyle([
-                        ("BACKGROUND",    (0,0), (-1,0),  cHead),
-                        ("ROWBACKGROUNDS",(0,1), (-1,-1), [cMid, cAlt]),
-                        ("GRID",          (0,0), (-1,-1), 0.4, cBlue),
-                        ("TOPPADDING",    (0,0), (-1,-1), 3),
-                        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-                        ("LEFTPADDING",   (0,0), (-1,-1), 2),
-                        ("RIGHTPADDING",  (0,0), (-1,-1), 2),
-                        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-                        ("WORDWRAP",      (0,0), (-1,-1), True),
+                    # Dos tonos oscuros para filas alternas — texto blanco siempre legible
+                    cRowA = colors.HexColor("#101E38")   # azul oscuro (igual que cMid)
+                    cRowB = colors.HexColor("#162848")   # azul medio-oscuro
+
+                    # Estilo base reutilizable para la tabla de iteraciones
+                    def _make_tbl_style(bg0=cRowA, bg1=cRowB):
+                        return TableStyle([
+                            ("BACKGROUND",    (0,0), (-1,0),  cHead),
+                            ("ROWBACKGROUNDS",(0,1), (-1,-1), [bg0, bg1]),
+                            ("GRID",          (0,0), (-1,-1), 0.4, cBlue),
+                            ("TOPPADDING",    (0,0), (-1,-1), 3),
+                            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                            ("LEFTPADDING",   (0,0), (-1,-1), 2),
+                            ("RIGHTPADDING",  (0,0), (-1,-1), 2),
+                            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+                        ])
+
+                    # ── Ancla: título de sección + encabezado + primeras filas
+                    # (se mantienen juntos para que el encabezado nunca quede
+                    #  huérfano al final de una página)
+                    N_ANCHOR = min(4, len(tbl_data))   # encabezado + hasta 3 filas de datos
+                    anchor_tbl = Table(tbl_data[:N_ANCHOR], colWidths=col_widths)
+                    anchor_tbl.setStyle(_make_tbl_style())
+                    elems.append(KeepTogether([
+                        _HR(1.0, cBlue),
+                        Paragraph("Tabla de Iteraciones", sSecHdr),
+                        anchor_tbl,
                     ]))
-                    elems.append(tbl)
+
+                    # ── Filas restantes: encabezado repetido al inicio de cada
+                    # página nueva, con colores alternados en continuidad
+                    if len(tbl_data) > N_ANCHOR:
+                        n_anchor_data = N_ANCHOR - 1        # filas de datos ya mostradas
+                        bg0 = cRowB if (n_anchor_data % 2 == 1) else cRowA
+                        bg1 = cRowA if bg0 == cRowB else cRowB
+                        remaining_data = [tbl_data[0]] + tbl_data[N_ANCHOR:]
+                        remaining_tbl = Table(
+                            remaining_data, colWidths=col_widths, repeatRows=1)
+                        remaining_tbl.setStyle(_make_tbl_style(bg0, bg1))
+                        elems.append(remaining_tbl)
                 else:
+                    elems.append(_HR(1.0, cBlue))
+                    elems.append(Paragraph("Tabla de Iteraciones", sSecHdr))
                     elems.append(Paragraph("Sin datos de iteración.", sBody))
 
                 # ── Cálculos paso a paso ───────────────────────────────────────
-                elems.append(Spacer(1, 0.25*cm))
-                elems.append(_HR(1.0, cBlue))
-                elems.append(Paragraph("Cálculos Paso a Paso", sSecHdr))
-                elems.append(Spacer(1, 0.1*cm))
-
+                elems.append(Spacer(1, 0.4*cm))
                 steps = self._build_step_by_step(entry)
-                for step_title, step_body in steps:
-                    body_lines = [l for l in step_body.split("\n") if l.strip()]
-                    elems.append(_step_box(step_title, body_lines))
-                    elems.append(Spacer(1, 0.1*cm))
+                if steps:
+                    # Anclar el título de la sección con el primer paso para que
+                    # el encabezado nunca quede solo al final de una página
+                    first_title, first_body = steps[0]
+                    first_lines = [l for l in first_body.split("\n") if l.strip()]
+                    elems.append(KeepTogether([
+                        _HR(1.0, cBlue),
+                        Paragraph("Cálculos Paso a Paso", sSecHdr),
+                        Spacer(1, 0.15*cm),
+                        _step_box(first_title, first_lines),
+                    ]))
+                    for step_title, step_body in steps[1:]:
+                        body_lines = [l for l in step_body.split("\n") if l.strip()]
+                        elems.append(Spacer(1, 0.12*cm))
+                        # Cada caja se mantiene unida: el título nunca queda
+                        # solo al fondo de una página separado de su contenido
+                        elems.append(KeepTogether([_step_box(step_title, body_lines)]))
+                    elems.append(Spacer(1, 0.12*cm))
+                else:
+                    elems.append(_HR(1.0, cBlue))
+                    elems.append(Paragraph("Cálculos Paso a Paso", sSecHdr))
 
-                # ── Gráficas ───────────────────────────────────────────────────
+                # ── Gráficas (siempre en página nueva) ────────────────────────
+                elems.append(PageBreak())
                 imgs = self._generate_plot_png(entry)
                 all_pdf_imgs.extend(imgs)
 
                 if imgs:
-                    # Sin PageBreak forzado — las gráficas fluyen en la misma página
-                    # si hay espacio, o reportlab las pasa a la siguiente automáticamente.
-                    # El banner + primera fila se mantienen juntos con KeepTogether.
                     img_w = (PW - 0.4*cm) / 2
-                    img_h = img_w * 0.55   # un poco más compactas para caber 2 filas/pág
+                    img_h = img_w * 0.55
 
                     def _img_cell(path, lbl):
                         try:
@@ -3617,14 +5522,14 @@ class InterfazOptimizacion(QMW):
                             ("VALIGN",        (0,0), (-1,-1), "TOP"),
                             ("LEFTPADDING",   (0,0), (-1,-1), 2),
                             ("RIGHTPADDING",  (0,0), (-1,-1), 2),
-                            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+                            ("BOTTOMPADDING", (0,0), (-1,-1), 8),
                         ]))
                         img_tables.append(rt)
-                        img_tables.append(Spacer(1, 0.1*cm))
+                        img_tables.append(Spacer(1, 0.2*cm))
 
                     # Banner de gráficas + primera fila juntos (no se parte)
                     graf_banner = _banner(f"Gráficas — {metodo}", f"f(x) = {entry['fx']}")
-                    first_block = [graf_banner, Spacer(1, 0.15*cm)]
+                    first_block = [graf_banner, Spacer(1, 0.25*cm)]
                     if img_tables:
                         first_block.append(img_tables[0])
                     elems.append(KeepTogether(first_block))

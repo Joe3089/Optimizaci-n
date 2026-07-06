@@ -1,22 +1,44 @@
 @echo off
-REM ==========================================
-REM Construir .exe con PyInstaller (Windows)
-REM ==========================================
-REM 1) Instala PyInstaller:
-REM    pip install pyinstaller
-REM
-REM 2) (Recomendado) Crea un icono .ico:
-REM    Convierte Menu\icono_app.png a Menu\icono_app.ico (PNG -> ICO)
-REM
-REM 3) Ejecuta este .bat en la carpeta del proyecto (donde está main.py)
-REM
-pyinstaller --noconsole --onefile ^
-  --name "OptimizadorFunciones" ^
-  --add-data "Menu\\fondo_optimizacion.png;Menu" ^
-  --add-data "Menu\\icono_app.png;Menu" ^
-  --icon "Menu\\icono_app.ico" ^
-  main.py
+echo.
+echo ============================================================
+echo   Optimizador de Funciones - Generando EXE...
+echo ============================================================
+echo.
+
+if not exist "main.py" (
+    echo [ERROR] No se encontro main.py
+    echo         Ejecuta desde la carpeta raiz del proyecto.
+    pause
+    exit /b 1
+)
+
+if not exist "Menu\WindowsIcon-min.ico" (
+    echo [ERROR] Falta Menu\WindowsIcon-min.ico
+    echo  Convierte el PNG en: https://convertio.co/es/png-ico/
+    pause
+    exit /b 1
+)
+
+echo [1/2] Limpiando builds anteriores...
+if exist "build" rmdir /s /q "build"
+if exist "dist\OptimizadorFunciones.exe" del /q "dist\OptimizadorFunciones.exe"
+
+echo [2/2] Compilando con PyInstaller...
+echo.
+python -m PyInstaller OptimizadorFunciones.spec --noconfirm
 
 echo.
-echo EXE generado en: dist\\OptimizadorFunciones.exe
+if exist "dist\OptimizadorFunciones.exe" (
+    echo ============================================================
+    echo   EXITO: dist\OptimizadorFunciones.exe generado
+    echo ============================================================
+    echo.
+    echo   Clic derecho sobre dist\OptimizadorFunciones.exe
+    echo   Enviar a - Escritorio (crear acceso directo)
+    echo.
+) else (
+    echo ============================================================
+    echo   ERROR: No se genero el EXE. Revisa los mensajes arriba.
+    echo ============================================================
+)
 pause
