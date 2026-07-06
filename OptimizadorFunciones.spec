@@ -49,6 +49,11 @@ a = Analysis(
         'app.ui.rotacion_3d_superficie',
         'app.ui.rotacion_3d',
         'app.optimization.multiobjective.schaffer',
+        'app.application.report_content',
+        'app.application.optimization_service',
+        'app.infrastructure.reporting.csv_export',
+        'app.infrastructure.reporting.xlsx_export',
+        'app.infrastructure.reporting.pdf_export',
         # SSL / red
         'certifi',
         'ssl',
