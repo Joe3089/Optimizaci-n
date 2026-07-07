@@ -19,7 +19,8 @@ from reportlab.platypus.flowables import HRFlowable
 from app.application import report_content
 
 
-def write_pdf(path: str, session: list) -> None:
+def write_pdf(path: str, session: list, *,
+              area_key: str = "general", logo_path: str = None) -> None:
     """
     PDF profesional en A4 vertical:
       Pág 1: RESUMEN — descripción función, tipo, estudios aplicables,
@@ -27,6 +28,12 @@ def write_pdf(path: str, session: list) -> None:
       Pág N: Por cada método — info detallada, tabla de iteraciones,
              cálculos paso a paso y gráficas 2D / 3D.
     Todo ajustado a los márgenes del documento.
+
+    `area_key`: "general" muestra las 5 áreas de aplicación (comportamiento
+    de siempre); cualquier otra clave de `report_content.AREA_ORDER` muestra
+    solo esa área, con métodos recomendados/ventajas/beneficios/innovación.
+    `logo_path`: si se da y existe, se antepone como imagen antes del banner
+    principal. Ninguno de los dos rompe el export si falta.
     """
     fx_global = session[0]["fx"] if session else ""
 
@@ -245,6 +252,15 @@ def write_pdf(path: str, session: list) -> None:
         return t
 
     elems = []
+
+    # ── Logo (portada) ──────────────────────────────────────────────────
+    logo_buf = report_content.load_logo(logo_path)
+    if logo_buf is not None:
+        try:
+            elems.append(RLImg(logo_buf, width=2.2*cm, height=2.2*cm, hAlign="CENTER"))
+            elems.append(Spacer(1, 0.15*cm))
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════════
     # PÁGINA 1-2: RESUMEN GENERAL  (fondo blanco, letras negras)
@@ -565,43 +581,28 @@ def write_pdf(path: str, session: list) -> None:
 
         elems.append(Spacer(1, 0.25*cm))
 
-        # ── Utilidad futura ────────────────────────────────────────────────
+        # ── Utilidad futura (según la finalidad elegida por el usuario) ────
         elems.append(_HR_w(1.5))
-        elems.append(Paragraph("Utilidad en Diversas Áreas a Futuro", sWSecHdr))
+        if area_key == "general":
+            elems.append(Paragraph("Utilidad en Diversas Áreas a Futuro", sWSecHdr))
+            area_keys_to_show = report_content.AREA_ORDER
+        else:
+            elems.append(Paragraph("Utilidad en el Área de Aplicación Seleccionada", sWSecHdr))
+            area_keys_to_show = [area_key]
 
-        areas = [
-            ("Ingeniería y Diseño",
-             "Los métodos de optimización son fundamentales en el diseño de "
-             "estructuras, circuitos eléctricos, sistemas de control y rutas "
-             "logísticas. La capacidad de encontrar mínimos de funciones de costo "
-             "o máximos de funciones de rendimiento es clave en cualquier proceso "
-             "de diseño óptimo."),
-            ("Inteligencia Artificial y Machine Learning",
-             "El entrenamiento de redes neuronales es en esencia un problema de "
-             "minimización de una función de pérdida en miles de dimensiones. "
-             "Los métodos de descenso de gradiente con condiciones de Wolfe/Armijo "
-             "son la base de optimizadores como Adam, SGD y L-BFGS usados en "
-             "frameworks como TensorFlow y PyTorch."),
-            ("Economía y Finanzas",
-             "La optimización de portafolios de inversión, la minimización de "
-             "riesgo financiero y la maximización de utilidad en modelos "
-             "econométricos dependen directamente de métodos numéricos robustos "
-             "como los implementados en esta herramienta."),
-            ("Ciencias Naturales e Investigación",
-             "En física, química y biología computacional, la minimización de "
-             "energía de sistemas moleculares, la calibración de modelos y la "
-             "estimación de parámetros de ecuaciones diferenciales son problemas "
-             "de optimización donde estos métodos encuentran aplicación directa."),
-            ("Robótica y Control Automático",
-             "La planificación de trayectorias de robots, el control predictivo "
-             "de procesos industriales (MPC) y la calibración de controladores "
-             "PID óptimos son aplicaciones directas de los métodos de optimización "
-             "con restricciones estudiados en este reporte."),
-        ]
-        for area, desc_area in areas:
+        for key in area_keys_to_show:
+            info = report_content.describe_area_utility(key)
             elems.append(Spacer(1, 0.1*cm))
-            elems.append(Paragraph(f"▸  {area}", sWConcH))
-            elems.append(_full_box_w(Paragraph(desc_area, sWConc)))
+            elems.append(Paragraph(f"▸  {info['titulo']}", sWConcH))
+            elems.append(_full_box_w(Paragraph(info["aplicacion"], sWConc)))
+            elems.append(Spacer(1, 0.1*cm))
+            elems.append(_section_box_w([
+                [Paragraph("Métodos recomendados:", sWLabel),
+                 Paragraph(", ".join(info["metodos_recomendados"]), sWVal)],
+                [Paragraph("Ventajas:", sWLabel), Paragraph(info["ventajas"], sWVal)],
+                [Paragraph("Beneficios:", sWLabel), Paragraph(info["beneficios"], sWVal)],
+                [Paragraph("Innovación:", sWLabel), Paragraph(info["innovacion"], sWVal)],
+            ]))
 
         elems.append(Spacer(1, 0.3*cm))
         elems.append(_HR_w(1.0))

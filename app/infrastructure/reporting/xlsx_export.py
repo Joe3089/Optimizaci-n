@@ -20,12 +20,15 @@ _METHODS_MD = frozenset({
 })
 
 
-def write_xlsx(path: str, session: list) -> None:
+def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
     """
     Exporta a Excel con estructura multi-pestaña:
       1) "RESUMEN" — función insertada, tipo de estudio, métodos aplicados
       2+) Una pestaña por método — resumen de resultados, tabla completa de
           iteraciones + gráficas 2D y 3D
+
+    `logo_path`: si se da y existe, se ancla en la esquina de la pestaña
+    RESUMEN. No rompe el export si falta.
     """
     fx_global = session[0]["fx"] if session else ""
 
@@ -86,7 +89,7 @@ def write_xlsx(path: str, session: list) -> None:
     # ══════════════════════════════════════════════════════════════════
     ws_r = wb.create_sheet("RESUMEN")
     ws_r.sheet_view.showGridLines = False
-    for ci, w in [(1,3),(2,26),(3,52),(4,3)]:
+    for ci, w in [(1,6),(2,26),(3,52),(4,3)]:
         _set_col_width(ws_r, ci, w)
 
     # Título principal
@@ -95,6 +98,16 @@ def write_xlsx(path: str, session: list) -> None:
         font=_font(bold=True, size=16),
         fill=_fill(C["bg_dark"]), align=_center(), height=40)
     ws_r.row_dimensions[2].height = 6
+
+    # Logo (columna A, ensanchada de 3 a 6 para que quepa)
+    logo_buf = report_content.load_logo(logo_path, max_px=72)
+    if logo_buf is not None:
+        try:
+            xl_logo = XLImg(logo_buf)
+            xl_logo.width = xl_logo.height = 36
+            ws_r.add_image(xl_logo, "A1")
+        except Exception:
+            pass
 
     r = 3
     # ── Bloque: Función analizada ─────────────────────────────────────

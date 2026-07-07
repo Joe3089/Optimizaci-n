@@ -59,6 +59,7 @@ QDSpin = QtWidgets.QDoubleSpinBox; QMsgBox = QtWidgets.QMessageBox
 QSplit = QtWidgets.QSplitter;     QFD  = QtWidgets.QFileDialog
 QScroll = QtWidgets.QScrollArea
 QMenu  = QtWidgets.QMenu
+QInputDlg = QtWidgets.QInputDialog
 try:    QAction = QtWidgets.QAction
 except: QAction = QtGui.QAction                           # type: ignore
 
@@ -3057,6 +3058,40 @@ class InterfazOptimizacion(QMW):
             "traj": self._traj(self._vars, self._hist, self._x0),
         }]
 
+    def _logo_path(self) -> str:
+        """Ruta al logo de la app (Menu/fondo_optimizacion.png), resuelta
+        igual que _find_bg (dev y PyInstaller congelado)."""
+        here = getattr(sys, '_MEIPASS', None) or os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return os.path.join(here, "Menu", "fondo_optimizacion.png")
+
+    # (clave interna, etiqueta visible) — la clave se pasa a
+    # report_content.describe_area_utility / pdf_export.write_pdf.
+    _AREA_OPTIONS = [
+        ("general",    "Estudio general (todas las áreas)"),
+        ("ingenieria", "Ingeniería y Diseño"),
+        ("ia_ml",      "Inteligencia Artificial y Machine Learning"),
+        ("economia",   "Economía y Finanzas"),
+        ("ciencias",   "Ciencias Naturales e Investigación"),
+        ("robotica",   "Robótica y Control Automático"),
+    ]
+
+    def _ask_area_finalidad(self) -> str:
+        """Pregunta al usuario la finalidad del estudio antes de exportar el
+        PDF; devuelve la clave de área ("general" si cancela)."""
+        labels = [lbl for _, lbl in self._AREA_OPTIONS]
+        choice, ok = QInputDlg.getItem(
+            self, "Finalidad del estudio",
+            "¿Para qué área quieres ver la aplicación de este estudio de la función?\n"
+            "(elige 'Estudio general' para ver las 5 áreas)",
+            labels, 0, False)
+        if not ok:
+            return "general"
+        for key, lbl in self._AREA_OPTIONS:
+            if lbl == choice:
+                return key
+        return "general"
+
     def export_csv_db(self):
         """
         Exporta 3 CSV normalizados + script SQL (ver
@@ -3099,7 +3134,7 @@ class InterfazOptimizacion(QMW):
 
         try:
             session = self._session_snapshot()
-            xlsx_export.write_xlsx(p, session)
+            xlsx_export.write_xlsx(p, session, logo_path=self._logo_path())
             self._show_export_success(
                 "Excel (.xlsx)", p,
                 f"Pestañas: RESUMEN + {len(session)} método(s)")
@@ -3118,12 +3153,14 @@ class InterfazOptimizacion(QMW):
         except ImportError:
             QMsgBox.warning(self, "Dependencia", "pip install reportlab"); return
 
+        area_key = self._ask_area_finalidad()
+
         p, _ = QFD.getSaveFileName(self, "Guardar PDF", "reporte.pdf", "PDF (*.pdf)")
         if not p: return
 
         try:
             session = self._session_snapshot()
-            pdf_export.write_pdf(p, session)
+            pdf_export.write_pdf(p, session, area_key=area_key, logo_path=self._logo_path())
             self._show_export_success(
                 "PDF", p,
                 f"Páginas: Resumen + {len(session)} método(s) con cálculos y gráficas")

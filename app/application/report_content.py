@@ -62,6 +62,25 @@ def make_grid(lo, hi, n=400):
     return np.linspace(lo, hi, max(50,int(n)))
 
 
+def load_logo(path: str, max_px: int = 200) -> Optional[io.BytesIO]:
+    """Carga el logo desde `path`, lo reduce a `max_px` (mantiene proporción)
+    y lo devuelve como buffer PNG en memoria — evita incrustar el asset
+    original (puede ser de alta resolución) tal cual en cada reporte
+    exportado. Devuelve None si el archivo no existe o no se puede leer."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(path)
+        img.thumbnail((max_px, max_px))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
 def generate_plot_png(entry: dict) -> list:
     """Genera PNGs 2D y 3D de alta calidad para exportación, con misma estética que pantalla."""
     import matplotlib
@@ -741,3 +760,153 @@ def build_conclusion(session: list, fx: str) -> str:
         "igualdad o desigualdad."
     )
     return "  ".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ÁREAS DE APLICACIÓN — para el selector de finalidad del reporte PDF
+# ══════════════════════════════════════════════════════════════════════════
+AREA_ORDER = ["ingenieria", "ia_ml", "economia", "ciencias", "robotica"]
+
+_AREAS: Dict[str, Dict[str, Any]] = {
+    "ingenieria": {
+        "titulo": "Ingeniería y Diseño",
+        "aplicacion": (
+            "Los métodos de optimización son fundamentales en el diseño de "
+            "estructuras, circuitos eléctricos, sistemas de control y rutas "
+            "logísticas. La capacidad de encontrar mínimos de funciones de costo "
+            "o máximos de funciones de rendimiento es clave en cualquier proceso "
+            "de diseño óptimo."
+        ),
+        "metodos_recomendados": [
+            "MD: Penalización (Newton)", "MD: Barreras (Newton)",
+            "MD: Pen. (BFGS)", "Grad. Conjugado",
+        ],
+        "ventajas": (
+            "Manejo nativo de restricciones de igualdad/desigualdad — las "
+            "limitantes físicas reales de un diseño (esfuerzos máximos, "
+            "capacidades, geometría) se incorporan directamente al problema."
+        ),
+        "beneficios": (
+            "Reduce el tiempo de iteración manual de diseño y produce resultados "
+            "reproducibles y documentados, en vez de ajustes por prueba y error."
+        ),
+        "innovacion": (
+            "Permite explorar automáticamente el espacio de diseño y encontrar "
+            "configuraciones no evidentes para el diseñador humano."
+        ),
+    },
+    "ia_ml": {
+        "titulo": "Inteligencia Artificial y Machine Learning",
+        "aplicacion": (
+            "El entrenamiento de redes neuronales es en esencia un problema de "
+            "minimización de una función de pérdida en miles de dimensiones. "
+            "Los métodos de descenso de gradiente con condiciones de Wolfe/Armijo "
+            "son la base de optimizadores como Adam, SGD y L-BFGS usados en "
+            "frameworks como TensorFlow y PyTorch."
+        ),
+        "metodos_recomendados": [
+            "Armijo", "Wolfe", "SA: Recocido Simulado",
+            "PSO: Enjambre", "GA: Algoritmo Genético",
+        ],
+        "ventajas": (
+            "Las condiciones de Armijo/Wolfe garantizan convergencia estable del "
+            "descenso de gradiente; los metaheurísticos (SA/PSO/GA) exploran "
+            "globalmente para evitar mínimos locales pobres en problemas no "
+            "convexos como la búsqueda de hiperparámetros."
+        ),
+        "beneficios": (
+            "Acelera la búsqueda de hiperparámetros y arquitecturas, reduciendo "
+            "el costo computacional total de entrenamiento."
+        ),
+        "innovacion": (
+            "Es la base conceptual de los optimizadores usados en los "
+            "frameworks de deep learning modernos."
+        ),
+    },
+    "economia": {
+        "titulo": "Economía y Finanzas",
+        "aplicacion": (
+            "La optimización de portafolios de inversión, la minimización de "
+            "riesgo financiero y la maximización de utilidad en modelos "
+            "econométricos dependen directamente de métodos numéricos robustos "
+            "como los implementados en esta herramienta."
+        ),
+        "metodos_recomendados": [
+            "Escalarización (Suma Ponderada)", "MO — Goal Programming",
+            "MO — ε-Constraint",
+        ],
+        "ventajas": (
+            "Modelan explícitamente el trade-off entre objetivos en conflicto "
+            "(por ejemplo, riesgo vs. retorno), en vez de forzar una única "
+            "métrica combinada arbitraria."
+        ),
+        "beneficios": (
+            "Produce decisiones de inversión trazables y cuantificables en vez "
+            "de heurísticas informales."
+        ),
+        "innovacion": (
+            "Permite generar fronteras eficientes completas (frente de Pareto) "
+            "en vez de una única solución de compromiso."
+        ),
+    },
+    "ciencias": {
+        "titulo": "Ciencias Naturales e Investigación",
+        "aplicacion": (
+            "En física, química y biología computacional, la minimización de "
+            "energía de sistemas moleculares, la calibración de modelos y la "
+            "estimación de parámetros de ecuaciones diferenciales son problemas "
+            "de optimización donde estos métodos encuentran aplicación directa."
+        ),
+        "metodos_recomendados": [
+            "Newton-Raphson", "Grad. Conjugado", "Sección Áurea",
+        ],
+        "ventajas": (
+            "Convergencia rápida (cuadrática en Newton-Raphson) para las "
+            "funciones suaves típicas de modelos físicos y experimentales."
+        ),
+        "beneficios": (
+            "Acelera la calibración de modelos experimentales y reduce el "
+            "número de simulaciones necesarias."
+        ),
+        "innovacion": (
+            "Aplicable a la estimación de parámetros en modelos donde la "
+            "derivada analítica está disponible simbólicamente."
+        ),
+    },
+    "robotica": {
+        "titulo": "Robótica y Control Automático",
+        "aplicacion": (
+            "La planificación de trayectorias de robots, el control predictivo "
+            "de procesos industriales (MPC) y la calibración de controladores "
+            "PID óptimos son aplicaciones directas de los métodos de optimización "
+            "con restricciones estudiados en este reporte."
+        ),
+        "metodos_recomendados": [
+            "MD: Pen. (BFGS)", "MD: Pes. (BFGS)",
+            "MD: Pes. (Nelder-Mead)", "PSO: Enjambre",
+        ],
+        "ventajas": (
+            "Soporta restricciones dinámicas y cinemáticas del robot de forma "
+            "nativa, sin necesitar relajaciones artificiales del problema."
+        ),
+        "beneficios": (
+            "Reduce el tiempo de sintonización manual de controladores y "
+            "trayectorias."
+        ),
+        "innovacion": (
+            "Permite re-optimizar trayectorias en tiempo real ante cambios del "
+            "entorno."
+        ),
+    },
+}
+
+
+def describe_area_utility(area_key: str) -> Dict[str, Any]:
+    """Devuelve el contenido estructurado (aplicación, métodos recomendados,
+    ventajas, beneficios, innovación) para el área `area_key` — una de
+    AREA_ORDER. Usado por el PDF para mostrar, según la finalidad que elija
+    el usuario, una sola área o las cinco ("estudio general")."""
+    try:
+        return _AREAS[area_key]
+    except KeyError:
+        raise ValueError(f"Área desconocida: {area_key!r}. Disponibles: {AREA_ORDER}")
