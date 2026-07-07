@@ -13,9 +13,11 @@ import numpy as np
 try:
     import sympy as sp
     _SYMPY = True
+    _SympifyError = sp.SympifyError
 except Exception:
     sp = None                                              # type: ignore
     _SYMPY = False
+    class _SympifyError(Exception): pass                  # placeholder inalcanzable
 
 _func_compat = None
 def _get_fc():
@@ -152,21 +154,59 @@ def _init_algorithm_modules():
     _modules_ready  = True
 
 
+class FunctionIncompatibleError(ValueError):
+    """La función ingresada no se pudo interpretar o no es compatible con el
+    método de estudio solicitado (expresión inválida, notación LaTeX, tipo
+    de dato inesperado, etc.). Mensaje siempre en español y listo para
+    mostrar al usuario tal cual — ver run_method()."""
+    pass
+
+
 def run_method(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
                mo_x0: Optional[float] = None,
                mo_alpha: Optional[float] = None):
     """
     Ejecuta el método de optimización solicitado y devuelve (hist, mo_context).
-
-    `mo_context` es None salvo para métodos "MO — ..." (multiobjetivo), en cuyo
-    caso es un dict con las claves tabla_ref/hist_iters/alpha/x_c/f1_call/f2_call/
-    var1 que la UI necesita para el ploteo posterior (antes se guardaba en
-    self._mo_*; ahora se devuelve explícitamente).
-
-    `mo_x0`/`mo_alpha` reemplazan la lectura directa de los widgets
-    edt_x0_mo/edt_alpha que hacía la versión original — la UI los lee y los
-    pasa como parámetros.
+    Envoltorio delgado de _run_method_impl: traduce cualquier fallo de
+    parseo/cómputo inesperado (TokenError, SympifyError, TypeError, etc. —
+    típicamente una expresión mal escrita o no compatible con el método
+    elegido) a FunctionIncompatibleError con mensaje en español. Los
+    RuntimeError/ValueError que _run_method_impl o func_compat ya lanzan
+    deliberadamente (módulo no encontrado, entrada faltante, número de
+    variables incompatible con el método, etc.) se propagan sin cambios:
+    ya son mensajes claros y específicos en español.
     """
+    try:
+        return _run_method_impl(metodo, fx, gx, vars_, x0, lo, hi, tol_L, mo_x0, mo_alpha)
+    except _SympifyError as ex:
+        # sp.SympifyError hereda de ValueError, así que se atrapa ANTES del
+        # `except (RuntimeError, ValueError)` de abajo — de lo contrario el
+        # error crudo de sympy (inglés, técnico) se propagaría tal cual.
+        raise FunctionIncompatibleError(
+            f"La función ingresada no es compatible con el método «{metodo}» "
+            f"(no se pudo interpretar como expresión matemática válida).\n\n"
+            f"Verifica que esté escrita en formato válido de Python/Sympy "
+            f"(ej.: x**2 - 4*x + 5), sin notación LaTeX ni símbolos como "
+            f"\\, $, {{ o }}.\n\nDetalle técnico: {ex}"
+        ) from ex
+    except (RuntimeError, ValueError):
+        # Ya son mensajes deliberados y específicos de este proyecto (módulo
+        # no encontrado, número de variables incompatible con el método,
+        # entrada faltante, etc.) — se propagan sin cambios.
+        raise
+    except Exception as ex:
+        raise FunctionIncompatibleError(
+            f"La función ingresada no es compatible con el método «{metodo}» "
+            f"(no se pudo aplicar este tipo de estudio a la expresión dada).\n\n"
+            f"Verifica que esté escrita en formato válido de Python/Sympy "
+            f"(ej.: x**2 - 4*x + 5), sin notación LaTeX ni símbolos como "
+            f"\\, $, {{ o }}.\n\nDetalle técnico: {ex}"
+        ) from ex
+
+
+def _run_method_impl(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
+                      mo_x0: Optional[float] = None,
+                      mo_alpha: Optional[float] = None):
     _init_algorithm_modules()
     newton_armijo_fn = getattr(_line_search_nd, "newton_armijo",            None) if _line_search_nd else None
     newton_wolfe_fn  = getattr(_line_search_nd, "newton_wolfe_step",         None) if _line_search_nd else None

@@ -20,11 +20,11 @@ if not exist "Menu\WindowsIcon-min.ico" (
     exit /b 1
 )
 
-echo [1/2] Limpiando builds anteriores...
+echo [1/3] Limpiando builds anteriores...
 if exist "build" rmdir /s /q "build"
 if exist "dist\OptimizadorFunciones.exe" del /q "dist\OptimizadorFunciones.exe"
 
-echo [2/2] Compilando con PyInstaller...
+echo [2/3] Compilando con PyInstaller...
 echo.
 python -m PyInstaller OptimizadorFunciones.spec --noconfirm
 
@@ -34,8 +34,16 @@ if exist "dist\OptimizadorFunciones.exe" (
     echo   EXITO: dist\OptimizadorFunciones.exe generado
     echo ============================================================
     echo.
-    echo   Clic derecho sobre dist\OptimizadorFunciones.exe
-    echo   Enviar a - Escritorio (crear acceso directo)
+    echo [3/3] Copiando el EXE al Escritorio...
+    copy /y "dist\OptimizadorFunciones.exe" "%USERPROFILE%\Desktop\OptimizadorFunciones.exe" >nul
+    if errorlevel 1 (
+        echo   No se pudo copiar al Escritorio automaticamente.
+        echo   Clic derecho sobre dist\OptimizadorFunciones.exe
+        echo   Enviar a - Escritorio (crear acceso directo)
+    ) else (
+        echo   Copiado a: %USERPROFILE%\Desktop\OptimizadorFunciones.exe
+        echo   ^(el EXE es autonomo: puedes moverlo/copiarlo a donde quieras^)
+    )
     echo.
 ) else (
     echo ============================================================
