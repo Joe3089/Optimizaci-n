@@ -12,6 +12,7 @@ from typing import Callable, List, Tuple, Dict, Any
 
 import numpy as np
 import sympy as sp
+from scipy.optimize import minimize
 
 
 def _parse_symbols(var_str: str):
@@ -337,3 +338,182 @@ def barrier_method_newton(func_str: str,
     vals = tuple(x.tolist()) if n > 1 else (float(x[0]),)
     f_opt = float(f_num(*vals))
     return x, f_opt, history_all
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Variantes con solver scipy (BFGS / Nelder-Mead) en vez de Newton propio.
+# Antes estos nombres ("penalty_bfgs", "steepest_bfgs", "nelder_mead",
+# "sum_bfgs") no existían: optimization_service.py caía en un fallback
+# silencioso a penalty_method_newton para las 4 etiquetas del combo que los
+# referenciaban, así que "MD: Pes. (BFGS)" y "MD: Pes. (Nelder-Mead)"
+# ejecutaban en realidad Newton+penalización cuadrática sin que el usuario
+# lo supiera. Se implementan aquí de verdad, cada una con una técnica de
+# restricción distinta para que el combo compare algo real:
+#   • penalty_bfgs   → misma penalización cuadrática que penalty_method_newton,
+#                      pero resuelta con BFGS (compara el solver interno).
+#   • steepest_bfgs  → penalización LINEAL de peso creciente, con BFGS.
+#   • nelder_mead    → la misma penalización lineal, pero sin derivadas
+#                      (Nelder-Mead) — compara un solver libre de gradiente.
+#   • sum_bfgs       → contraejemplo pedagógico: suma ingenua f(x)+g(x) sin
+#                      escalar ningún peso, una sola pasada con BFGS.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _scipy_history_run(phi: Callable[[np.ndarray], float],
+                       x0: np.ndarray,
+                       method: str,
+                       maxiter: int = 100) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+    """Corre scipy.optimize.minimize registrando cada iteración con el mismo
+    esquema de historial que _newton_unconstrained (k, x_k, x_k_str, f_k,
+    grad_norm, alpha_k) para que tabla/gráficas/export sigan funcionando
+    igual. scipy no expone el gradiente interno vía callback, así que
+    grad_norm se aproxima por diferencias finitas; alpha_k es la distancia
+    recorrida desde el punto anterior (scipy tampoco expone su alpha)."""
+    history: List[Dict[str, Any]] = []
+
+    def _grad_fd(x: np.ndarray, h: float = 1e-6) -> np.ndarray:
+        g = np.zeros_like(x)
+        f0 = phi(x)
+        for i in range(len(x)):
+            xp = x.copy(); xp[i] += h
+            g[i] = (phi(xp) - f0) / h
+        return g
+
+    def _record(x: np.ndarray) -> None:
+        x = _as_np(x)
+        prev_x = history[-1]["x_k"] if history else x
+        history.append({
+            "k": len(history),
+            "x_k": x.copy(),
+            "x_k_str": _format_x(x),
+            "f_k": float(phi(x)),
+            "grad_norm": float(np.linalg.norm(_grad_fd(x))),
+            "alpha_k": float(np.linalg.norm(x - prev_x)),
+        })
+
+    x0 = _as_np(x0)
+    _record(x0)
+    res = minimize(phi, x0, method=method,
+                    callback=lambda xk: _record(xk),
+                    options={"maxiter": maxiter})
+    if not np.allclose(history[-1]["x_k"], res.x):
+        _record(res.x)
+    return _as_np(res.x), history
+
+
+def penalty_bfgs(func_str: str, constr_str: str, var_str: str, x0,
+                 mu0: float = 1.0, mu_factor: float = 10.0,
+                 outer_iters: int = 3) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
+    """Penalización cuadrática para g(x) <= 0 (misma fórmula que
+    penalty_method_newton: phi(x)=f(x)+mu*max(0,g(x))^2, mu creciendo x10 en
+    cada una de outer_iters pasadas), resuelta con BFGS (scipy) en vez de
+    Newton propio."""
+    names, syms = _parse_symbols(var_str)
+    x = _as_np(x0)
+    n = len(syms)
+
+    f_sym = sp.sympify(func_str)
+    f_num = _safe_eval_lambdify(f_sym, syms)
+    g_sym = sp.sympify(constr_str) if (constr_str and constr_str.strip() != "0") else sp.Integer(0)
+    g_pos = sp.Piecewise((g_sym, g_sym > 0), (0, True))
+
+    history_all: List[Dict[str, Any]] = []
+    mu = float(mu0)
+    for _outer in range(outer_iters):
+        phi_num = sp.lambdify(syms, sp.simplify(f_sym + mu * (g_pos ** 2)), "numpy")
+
+        def phi(xv: np.ndarray, _phi_num=phi_num) -> float:
+            vals = tuple(xv.tolist()) if n > 1 else (float(xv[0]),)
+            return float(_phi_num(*vals))
+
+        x, hist_inner = _scipy_history_run(phi, x, method="BFGS")
+        k0 = len(history_all)
+        for rec in hist_inner:
+            rec["k"] = k0 + rec["k"]; rec["mu"] = mu
+            history_all.append(rec)
+        mu *= mu_factor
+
+    vals = tuple(x.tolist()) if n > 1 else (float(x[0]),)
+    f_opt = float(f_num(*vals))
+    return x, f_opt, history_all
+
+
+def _weighted_penalty_run(func_str: str, constr_str: str, var_str: str, x0,
+                          method: str, w0: float, w_factor: float,
+                          outer_iters: int) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
+    """Penalización LINEAL de peso creciente: phi(x)=f(x)+w*max(0,g(x)), con
+    w creciendo en cada pasada — a diferencia de la cuadrática (Pen.), el
+    costo de violar la restricción crece linealmente. Compartido por
+    steepest_bfgs (BFGS) y nelder_mead (Nelder-Mead)."""
+    names, syms = _parse_symbols(var_str)
+    x = _as_np(x0)
+    n = len(syms)
+
+    f_sym = sp.sympify(func_str)
+    f_num = _safe_eval_lambdify(f_sym, syms)
+    g_sym = sp.sympify(constr_str) if (constr_str and constr_str.strip() != "0") else sp.Integer(0)
+    g_pos = sp.Piecewise((g_sym, g_sym > 0), (0, True))
+
+    history_all: List[Dict[str, Any]] = []
+    w = float(w0)
+    for _outer in range(outer_iters):
+        phi_num = sp.lambdify(syms, sp.simplify(f_sym + w * g_pos), "numpy")
+
+        def phi(xv: np.ndarray, _phi_num=phi_num) -> float:
+            vals = tuple(xv.tolist()) if n > 1 else (float(xv[0]),)
+            return float(_phi_num(*vals))
+
+        x, hist_inner = _scipy_history_run(phi, x, method=method)
+        k0 = len(history_all)
+        for rec in hist_inner:
+            rec["k"] = k0 + rec["k"]; rec["w"] = w
+            history_all.append(rec)
+        w *= w_factor
+
+    vals = tuple(x.tolist()) if n > 1 else (float(x[0]),)
+    f_opt = float(f_num(*vals))
+    return x, f_opt, history_all
+
+
+def steepest_bfgs(func_str: str, constr_str: str, var_str: str, x0,
+                  w0: float = 1.0, w_factor: float = 5.0,
+                  outer_iters: int = 3) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
+    """Penalización lineal de peso creciente resuelta con BFGS. Ver
+    _weighted_penalty_run."""
+    return _weighted_penalty_run(func_str, constr_str, var_str, x0,
+                                  "BFGS", w0, w_factor, outer_iters)
+
+
+def nelder_mead(func_str: str, constr_str: str, var_str: str, x0,
+                w0: float = 1.0, w_factor: float = 5.0,
+                outer_iters: int = 3) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
+    """Misma penalización lineal de peso creciente que steepest_bfgs, pero
+    resuelta con Nelder-Mead (sin derivadas) — compara un solver libre de
+    gradiente contra uno basado en gradiente, con la misma técnica de
+    restricción."""
+    return _weighted_penalty_run(func_str, constr_str, var_str, x0,
+                                  "Nelder-Mead", w0, w_factor, outer_iters)
+
+
+def sum_bfgs(func_str: str, constr_str: str, var_str: str, x0
+            ) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
+    """Técnica ingenua de 'sumar' la restricción al objetivo en una sola
+    pasada, sin escalar ningún peso: h(x)=f(x)+g(x), resuelta con BFGS.
+    Sirve de contraejemplo pedagógico frente a penalización/barrera: al no
+    crecer el peso, en general NO fuerza la factibilidad."""
+    names, syms = _parse_symbols(var_str)
+    x0 = _as_np(x0)
+    n = len(syms)
+
+    f_sym = sp.sympify(func_str)
+    f_num = _safe_eval_lambdify(f_sym, syms)
+    g_sym = sp.sympify(constr_str) if (constr_str and constr_str.strip() != "0") else sp.Integer(0)
+    h_num = sp.lambdify(syms, f_sym + g_sym, "numpy")
+
+    def phi(xv: np.ndarray) -> float:
+        vals = tuple(xv.tolist()) if n > 1 else (float(xv[0]),)
+        return float(h_num(*vals))
+
+    x, history = _scipy_history_run(phi, x0, method="BFGS")
+    vals = tuple(x.tolist()) if n > 1 else (float(x[0]),)
+    f_opt = float(f_num(*vals))
+    return x, f_opt, history

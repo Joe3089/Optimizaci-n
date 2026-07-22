@@ -39,6 +39,10 @@ _RESERVED: set = {
     "sqrt", "cbrt", "abs", "sign", "heaviside",
     "floor", "ceil", "round", "mod",
     "max", "min", "sum", "prod",
+    # notación Sympy con mayúscula inicial (Abs(x-2), Max(x,y)…) — sympify
+    # las reconoce igual que sus versiones en minúscula, pero el detector de
+    # variables (case-sensitive) las confundía con variables nuevas.
+    "Abs", "Max", "Min", "Sign", "Floor", "Ceiling", "Piecewise",
     # constantes
     "pi", "e", "E", "inf", "nan", "true", "false",
     "True", "False", "None",

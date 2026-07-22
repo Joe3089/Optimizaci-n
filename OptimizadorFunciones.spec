@@ -54,8 +54,8 @@ a = Analysis(
         'app.infrastructure.reporting.csv_export',
         'app.infrastructure.reporting.xlsx_export',
         'app.infrastructure.reporting.pdf_export',
-        # Motor de escalarización multiobjetivo (aditivo, Fase 6-8; aún no
-        # conectado a la UI, pero se incluye en el bundle para uso futuro)
+        # Motor de escalarización multiobjetivo (Fase 6-8, conectado a la UI
+        # en el combo "MO — ..." desde el commit dfb4ecb)
         'app.optimization.multiobjective.scalarization',
         'app.optimization.multiobjective.scalarization.weighted_sum',
         'app.optimization.multiobjective.scalarization.lexicographic',
@@ -91,6 +91,18 @@ a = Analysis(
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
         'PyQt6.sip',
+        # Voz (Tarea 5): TTS offline (SAPI5 vía pyttsx3) + grabación de
+        # micrófono (sounddevice) para el asistente de IA.
+        'pyttsx3',
+        'pyttsx3.drivers',
+        'pyttsx3.drivers.sapi5',
+        'comtypes',
+        'comtypes.stream',
+        'win32com',
+        'win32com.client',
+        'sounddevice',
+        '_sounddevice_data',
+        'wave',
     ],
     hookspath=[],
     hooksconfig={},

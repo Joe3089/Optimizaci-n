@@ -18,13 +18,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 from typing import List, Dict, Optional
 
-# ─── Directorio raíz de la app ────────────────────────────────────────────────
-# Cuando corre como EXE (PyInstaller frozen), __file__ apunta al directorio
-# temporal _MEIPASS que se borra al cerrar. En su lugar usamos sys.executable
-# para apuntar a la carpeta donde vive el .exe, donde sí están .env y el config.
+# ─── Directorio raíz de la app (solo lectura: iconos/fondos ya viajan dentro
+# del EXE vía _MEIPASS; esto es únicamente fallback legado para .env/config) ──
 def _get_app_dir() -> str:
     """Devuelve la carpeta de la app: directorio del EXE (frozen) o del script."""
     if getattr(sys, "frozen", False):
@@ -32,8 +31,45 @@ def _get_app_dir() -> str:
     # __file__ vive en app/infrastructure/; la raíz del proyecto está dos niveles arriba.
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_APP_DIR  = _get_app_dir()
-_CFG_FILE = os.path.join(_APP_DIR, ".optimizer_config.json")
+# ─── Carpeta de datos de usuario ───────────────────────────────────────────────
+# La API Key y el config NO pueden depender de dónde vive el .exe: un acceso
+# directo en el Escritorio, movido o copiado a cualquier lugar, debe seguir
+# encontrando la key guardada. Por eso se persisten en %APPDATA% (igual que
+# cualquier app profesional de Windows), no "junto al EXE".
+def _get_user_data_dir() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "OptimizadorFunciones")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+_APP_DIR       = _get_app_dir()
+_USER_DATA_DIR = _get_user_data_dir()
+_CFG_FILE        = os.path.join(_USER_DATA_DIR, ".optimizer_config.json")
+_LEGACY_CFG_FILE = os.path.join(_APP_DIR, ".optimizer_config.json")
+
+
+def _migrate_legacy_config() -> None:
+    """Copia (una sola vez, sin borrar el original) un config/.env legado que
+    viva junto al EXE hacia %APPDATA%, para no perder una key ya guardada al
+    aplicar este cambio."""
+    try:
+        if not os.path.exists(_CFG_FILE) and os.path.exists(_LEGACY_CFG_FILE):
+            shutil.copy2(_LEGACY_CFG_FILE, _CFG_FILE)
+    except Exception:
+        pass
+    try:
+        _new_env = os.path.join(_USER_DATA_DIR, ".env")
+        _old_env = os.path.join(_APP_DIR, ".env")
+        if not os.path.exists(_new_env) and os.path.exists(_old_env):
+            shutil.copy2(_old_env, _new_env)
+    except Exception:
+        pass
+
+
+_migrate_legacy_config()
 
 # ─── Qt ──────────────────────────────────────────────────────────────────────
 try:
@@ -53,6 +89,26 @@ try:
     _HTTP_OK = True
 except ImportError:
     _HTTP_OK = False
+
+# ─── Voz: TTS (pyttsx3 / SAPI5, offline) ──────────────────────────────────────
+try:
+    import pyttsx3
+    _TTS_OK = True
+except Exception:
+    pyttsx3 = None
+    _TTS_OK = False
+
+# ─── Voz: grabación de micrófono (sounddevice) ────────────────────────────────
+try:
+    import sounddevice as _sd
+    import numpy as _np
+    import wave as _wave
+    import tempfile as _tempfile
+    import uuid as _uuid
+    _REC_OK = True
+except Exception:
+    _sd = None
+    _REC_OK = False
 
 import ssl as _ssl
 def _ssl_ctx():
@@ -162,34 +218,36 @@ def _load_api_key_auto() -> tuple:
         if _is_valid_key(k) and k not in keys_found:
             keys_found.append(k)
 
-    # 2 ── Archivo de configuración
-    try:
-        if os.path.exists(_CFG_FILE):
-            with open(_CFG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for field in ("api_key", "api_key_backup"):
-                k = data.get(field, "").strip()
-                if _is_valid_key(k) and k not in keys_found:
-                    keys_found.append(k)
-    except Exception:
-        pass
+    # 2 ── Archivo de configuración (%APPDATA% primero; junto al EXE como fallback)
+    for cfg_path in (_CFG_FILE, _LEGACY_CFG_FILE):
+        try:
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for field in ("api_key", "api_key_backup"):
+                    k = data.get(field, "").strip()
+                    if _is_valid_key(k) and k not in keys_found:
+                        keys_found.append(k)
+        except Exception:
+            pass
 
-    # 3 ── Archivo .env (siempre junto al EXE/script, no en _MEIPASS)
-    env_path = os.path.join(_APP_DIR, ".env")
-    try:
-        if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    for var in ("GROQ_API_KEY", "OPENROUTER_API_KEY"):
-                        if line.startswith(var + "="):
-                            parts = line.split("=", 1)
-                            if len(parts) == 2:
-                                k = parts[1].strip().strip('"').strip("'")
-                                if _is_valid_key(k) and k not in keys_found:
-                                    keys_found.append(k)
-    except Exception:
-        pass
+    # 3 ── Archivo .env (%APPDATA%\OptimizadorFunciones primero; junto al
+    #      EXE/script como fallback legado — nunca en _MEIPASS, se borra al cerrar)
+    for env_path in (os.path.join(_USER_DATA_DIR, ".env"), os.path.join(_APP_DIR, ".env")):
+        try:
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        for var in ("GROQ_API_KEY", "OPENROUTER_API_KEY"):
+                            if line.startswith(var + "="):
+                                parts = line.split("=", 1)
+                                if len(parts) == 2:
+                                    k = parts[1].strip().strip('"').strip("'")
+                                    if _is_valid_key(k) and k not in keys_found:
+                                        keys_found.append(k)
+        except Exception:
+            pass
 
     primary = keys_found[0] if len(keys_found) > 0 else ""
     backup  = keys_found[1] if len(keys_found) > 1 else ""
@@ -319,6 +377,40 @@ def _md_to_html(text: str) -> str:
         result.append(esc)
 
     return '<br/>'.join(result)
+
+
+def _table_md_to_html(raw_rows: str) -> str:
+    """Convierte una tabla markdown (| col | col |, fila separadora ---) a una
+    <table> HTML legible dentro del QTextEdit del chat (estilo Minimax:
+    encabezado resaltado, filas alternadas)."""
+    import html as _hl
+    lines = [ln.strip() for ln in raw_rows.split('\n') if ln.strip()]
+    if len(lines) < 2:
+        return _md_to_html(raw_rows)
+
+    def _cells(line: str) -> list:
+        inner = line.strip().strip('|')
+        return [c.strip() for c in inner.split('|')]
+
+    header = _cells(lines[0])
+    rows = [_cells(ln) for ln in lines[2:]]  # lines[1] es la fila separadora ---
+
+    th = "".join(
+        f'<th style="padding:4px 8px;border:1px solid rgba(80,120,200,140);'
+        f'background:rgba(30,60,140,200);color:#dce8f8;">{_hl.escape(c)}</th>'
+        for c in header)
+    trs = []
+    for i, row in enumerate(rows):
+        bg = "rgba(10,20,50,160)" if i % 2 == 0 else "rgba(15,28,65,160)"
+        tds = "".join(
+            f'<td style="padding:4px 8px;border:1px solid rgba(60,90,160,110);'
+            f'color:#c8ddf8;background:{bg};">{_hl.escape(c)}</td>'
+            for c in row)
+        trs.append(f'<tr>{tds}</tr>')
+
+    return (f'<table cellspacing="0" style="border-collapse:collapse;font-size:10pt;'
+            f'font-family:\'Segoe UI\',Consolas;margin:4px 0;">'
+            f'<tr>{th}</tr>{"".join(trs)}</table>')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -487,10 +579,15 @@ def _render_math_img_v2(mathtext_expr: str,
         return None
 
 
+_TABLE_ROW = _re_math.compile(r'^\|.*\|\s*$')
+_TABLE_SEP = _re_math.compile(r'^\|?[\s:|-]+\|[\s:|-]*\|?$')
+
+
 def _parse_response_blocks(text: str) -> list:
     """
     Divide la respuesta del AI en bloques tipados para renderizado rico:
       ('code',         lang,     content)  — bloque ```lang ... ```
+      ('table',        '',       raw_rows) — tabla markdown (| col | col |, fila separadora --- )
       ('display_math', '',       expr)     — expresión math sola en su línea (grande, centrada)
       ('line',         '',       raw_line) — línea normal (texto / bullet / math inline)
     """
@@ -509,6 +606,18 @@ def _parse_response_blocks(text: str) -> list:
                 i += 1
             blocks.append(('code', lang, '\n'.join(code_lines)))
             i += 1
+            continue
+
+        # Tabla markdown: fila de encabezado | ... | seguida de fila separadora
+        # |---|---| (con opcionales : para alineación) — al menos 2 líneas.
+        if (_TABLE_ROW.match(lines[i].strip())
+                and i + 1 < len(lines) and _TABLE_SEP.match(lines[i + 1].strip())):
+            table_lines = [lines[i], lines[i + 1]]
+            i += 2
+            while i < len(lines) and _TABLE_ROW.match(lines[i].strip()):
+                table_lines.append(lines[i])
+                i += 1
+            blocks.append(('table', '', '\n'.join(table_lines)))
             continue
 
         raw      = lines[i]
@@ -851,21 +960,43 @@ al usuario con todo lo relacionado a esta aplicación y sus métodos matemático
 - Newton-Raphson: x_{k+1} = x_k - H⁻¹·∇f, convergencia cuadrática
 - Gradiente Conjugado: Fletcher-Reeves, β=‖∇f_{k+1}‖²/‖∇f_k‖²
 
-### Multidimensional (MD):
-- MD: Penalización (Newton): φ(x) = f(x) + μ·max(0,g(x))²
-- MD: Barreras (Newton): φ(x) = f(x) - (1/t)·ln(-g(x))
-- MD: Pen./Pes./Sum. (BFGS): cuasi-Newton, aproxima H⁻¹ con gradientes
-- MD: Pes. (Nelder-Mead): simplex sin derivadas
+### Multidimensional (MD) — restringidos, los 6 REQUIEREN g(x):
+- MD: Penalización (Newton): φ(x) = f(x) + μ·max(0,g(x))², μ crece x10, Newton propio
+- MD: Barreras (Newton): φ(x) = f(x) - (1/t)·ln(-g(x)), requiere punto factible interior
+- MD: Pen. (BFGS): misma penalización cuadrática que Penalización (Newton), resuelta con BFGS
+- MD: Pes. (BFGS): penalización LINEAL φ=f(x)+w·max(0,g(x)), peso w creciente, con BFGS
+- MD: Pes. (Nelder-Mead): misma penalización lineal que Pes. (BFGS), pero sin derivadas (simplex)
+- MD: Sum. (BFGS): suma ingenua h(x)=f(x)+g(x) de una sola pasada — contraejemplo pedagógico,
+  NO garantiza factibilidad (a diferencia de los otros 5)
+Si el usuario pide un método MD sin haber definido g(x), explica que esos 6 métodos
+necesitan una restricción para tener sentido — la app ya bloquea la ejecución en ese caso.
 
 ### Metaheurísticos:
 - SA: Recocido Simulado: acepta peores con P=exp(-ΔE/T), T decrece
 - PSO: Enjambre: v_i = w·v_i + c₁·r₁·(pbest-x_i) + c₂·r₂·(gbest-x_i)
 - GA: Algoritmo Genético: selección torneo + cruce aritmético + mutación gaussiana
 
+### Multiobjetivo (MO) — 14 métodos, todos parten de una f(x) mono-objetivo de 1 variable
+(la app genera automáticamente F(x)=[f1,f2] con f1=f(x), f2=(x-x_centro)²):
+- Escalarización (Suma Ponderada): φ=w1·f1+w2·f2 — simple, no cubre frentes cóncavos
+- MO — Bisección / MO — Sección Dorada: la misma suma ponderada, resuelta con esos solvers
+- MO — Frente de Pareto: barre α∈[0,1] y devuelve el frente completo, no un solo punto
+- MO — Análisis Jacobiano: diagnóstico de estacionariedad de Pareto en una malla de puntos
+- MO — Lexicográfico: prioridad estricta f1≻f2
+- MO — Goal Programming: minimiza desviación respecto a metas por objetivo
+- MO — ε-Constraint: deja un objetivo libre, el otro como restricción fᵢ≤εᵢ
+- MO — ASF (Logro) / MO — Chebyshev / MO — Punto de Referencia: cubren TODO el frente
+  de Pareto (incluso regiones cóncavas), minimizando distancia a un punto de referencia
+- MO — NBI / MO — Restricción Normal: distribución uniforme de puntos en el frente
+- MO — Peso Adaptativo: suma ponderada + penalización de cercanía a puntos ya explorados
+Si el usuario da una función de 2+ variables para un método MO, la app la rechaza — estos
+métodos siempre parten de f(x) de 1 sola variable.
+
 ## FUNCIONES SOPORTADAS (sintaxis Python/SymPy):
 - Polinomiales: x**2 - 4*x + 5, 2*(x1-3)**2 + x1*x2**3
 - Trigonométricas: cos(x)*exp(-x**2), sin(x)/x
 - Exponenciales: exp(-x**2), log(x+1)
+- Valor absoluto y funciones especiales: Abs(x-2), Max(x,y) (con mayúscula inicial, notación Sympy)
 - Benchmark: Rosenbrock, Himmelblau, Rastrigin, Ackley, Griewank, Beale
 - Operadores: ** para potencia (no ^), * para multiplicación
 
@@ -905,12 +1036,23 @@ y los métodos implementados en esta aplicación (Armijo, Wolfe, Fibonacci, \
 Newton-Raphson, PSO, GA, Recocido Simulado, etc.). \
 ¿En qué puedo ayudarte con el optimizador?"
 
-## ESTILO DE RESPUESTA:
-- Respuestas completas y detalladas según lo que se pida (sin límite de palabras arbitrario)
-- Usa notación matemática clara: f(x), ∇f, α, μ, etc.
-- Cuando recomiendes un método, explica brevemente POR QUÉ
-- Si hay un error en la función del usuario, muestra la corrección
-- Idioma: SIEMPRE español
+## TONO Y ESTILO CONVERSACIONAL:
+- Hablas como un asistente humano cercano, no como un manual — español latino
+  neutro, natural, directo. Nada de "estimado usuario" ni tono de formulario.
+- Puedes abrir con una frase breve y cálida ("Buena pregunta", "Vamos a verlo")
+  antes de entrar en materia, sin sonar forzado ni repetir la misma muletilla siempre.
+- Sé claro y ve al punto: no rellenes con paja ni repitas la pregunta del usuario
+  antes de responder.
+- Respuestas completas y detalladas según lo que se pida (sin límite de palabras
+  arbitrario), pero organizadas: usa encabezados (##), listas y **negritas** para
+  que se lea fácil, no un bloque de texto corrido.
+- Usa notación matemática clara: f(x), ∇f, α, μ, etc. Cuando ayude a entender,
+  arma una tabla en markdown (| columna | columna |) en vez de una lista larga.
+- Cuando recomiendes un método, explica brevemente POR QUÉ — no des una
+  recomendación sin razón.
+- Si hay un error en la función del usuario, muestra la corrección concreta,
+  no solo "está mal".
+- Idioma: SIEMPRE español latino.
 
 ## CONTEXTO ACTUAL (se actualiza con cada cálculo):
 {context}
@@ -1143,6 +1285,199 @@ class _AIWorker(QThread):
 
         return last_err
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VOZ — Text-to-Speech (SAPI5/pyttsx3, offline) y Speech-to-Text (Groq Whisper)
+# ══════════════════════════════════════════════════════════════════════════════
+_REC_SAMPLERATE = 16000  # Hz — suficiente para voz, tamaño de archivo razonable
+
+
+def _strip_markdown_for_speech(text: str) -> str:
+    """Limpia markdown/símbolos matemáticos para que el TTS no los lea en
+    voz alta literalmente (p. ej. no diga 'asterisco asterisco')."""
+    s = text
+    s = re.sub(r'```.*?```', ' [bloque de código omitido] ', s, flags=re.DOTALL)
+    s = re.sub(r'`([^`]+)`', r'\1', s)
+    s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)
+    s = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'\1', s)
+    s = re.sub(r'^#{1,3}\s+', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^[•\-]\s+', '', s, flags=re.MULTILINE)
+    s = re.sub(r'[_#>]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _find_spanish_voice(engine) -> Optional[str]:
+    """Busca una voz en español entre las instaladas en Windows (SAPI5).
+    Devuelve el id de voz o None si no hay ninguna instalada."""
+    try:
+        for v in engine.getProperty("voices"):
+            langs = [str(l).lower() for l in (getattr(v, "languages", None) or [])]
+            if ("es-" in v.id.lower() or "_es" in v.id.lower()
+                    or "spanish" in v.name.lower() or "español" in v.name.lower()
+                    or any(l.startswith("es") for l in langs)):
+                return v.id
+    except Exception:
+        pass
+    return None
+
+
+class _TTSWorker(QThread):
+    """Sintetiza y reproduce la respuesta en voz (SAPI5 vía pyttsx3), en un
+    hilo aparte para no bloquear la UI mientras habla."""
+    error_occurred = Signal(str)
+    finished_speaking = Signal()
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._text = text
+
+    def run(self):
+        if not _TTS_OK:
+            self.error_occurred.emit(
+                "La síntesis de voz no está disponible en este equipo "
+                "(falta el paquete pyttsx3).")
+            return
+        try:
+            engine = pyttsx3.init()
+            voice_id = _find_spanish_voice(engine)
+            if not voice_id:
+                self.error_occurred.emit(
+                    "No encontré una voz en español instalada en Windows, así "
+                    "que no puedo leer la respuesta en voz alta. Para agregarla: "
+                    "Configuración → Hora e idioma → Idioma y región → "
+                    "Agregar idioma → Español, y marca \"Instalar voz\". "
+                    "Mientras tanto, sigo respondiendo por escrito.")
+                return
+            engine.setProperty("voice", voice_id)
+            engine.setProperty("rate", 178)
+            engine.say(self._text)
+            engine.runAndWait()
+            self.finished_speaking.emit()
+        except Exception as ex:
+            self.error_occurred.emit(f"No se pudo reproducir la voz: {ex}")
+
+
+class _RecordWorker(QThread):
+    """Graba audio del micrófono en un hilo aparte hasta que se llama a
+    stop(); guarda un WAV temporal en 16 kHz mono (formato que espera Whisper)."""
+    error_occurred = Signal(str)
+    recording_ready = Signal(str)   # ruta del WAV grabado
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frames: list = []
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+
+    def run(self):
+        if not _REC_OK:
+            self.error_occurred.emit(
+                "La grabación de audio no está disponible en este equipo "
+                "(falta el paquete sounddevice) o no se detectó un micrófono.")
+            return
+        self._frames = []
+        try:
+            def _callback(indata, frames, time_info, status):
+                self._frames.append(indata.copy())
+
+            with _sd.InputStream(samplerate=_REC_SAMPLERATE, channels=1,
+                                  dtype="int16", callback=_callback):
+                while not self._stop_flag:
+                    self.msleep(50)
+        except Exception as ex:
+            self.error_occurred.emit(
+                f"No se pudo acceder al micrófono: {ex}\n\n"
+                f"Verifica que Windows tenga permiso de micrófono para esta "
+                f"app (Configuración → Privacidad → Micrófono) y que haya un "
+                f"micrófono conectado.")
+            return
+
+        if not self._frames:
+            self.error_occurred.emit("No se grabó audio (grabación demasiado corta).")
+            return
+
+        audio = _np.concatenate(self._frames, axis=0)
+        fd, path = _tempfile.mkstemp(suffix=".wav", prefix="optimizador_voz_")
+        os.close(fd)
+        with _wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # int16
+            wf.setframerate(_REC_SAMPLERATE)
+            wf.writeframes(audio.tobytes())
+        self.recording_ready.emit(path)
+
+
+def _transcribe_audio_groq(key: str, wav_path: str, language: str = "es") -> str:
+    """Sube un WAV a la API de transcripción de Groq (Whisper) y devuelve el
+    texto transcrito. Lanza RuntimeError con mensaje en español si falla —
+    mismo patrón de manejo de errores que _AIWorker._call_groq."""
+    boundary = _uuid.uuid4().hex
+
+    def _field(name: str, value: str) -> bytes:
+        return (f'--{boundary}\r\nContent-Disposition: form-data; '
+                f'name="{name}"\r\n\r\n{value}\r\n').encode("utf-8")
+
+    with open(wav_path, "rb") as f:
+        audio_bytes = f.read()
+
+    body = b"".join([
+        _field("model", "whisper-large-v3-turbo"),
+        _field("language", language),
+        _field("response_format", "json"),
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+         f'filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode("utf-8"),
+        audio_bytes,
+        f"\r\n--{boundary}--\r\n".encode("utf-8"),
+    ])
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Authorization": f"Bearer {key}"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=_ssl_ctx()) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return (data.get("text") or "").strip()
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode("utf-8", errors="replace")
+        try:    msg = json.loads(body_txt).get("error", {}).get("message", body_txt[:150])
+        except Exception: msg = body_txt[:150]
+        if e.code == 401:
+            raise RuntimeError("API Key de Groq inválida para transcripción de voz.")
+        raise RuntimeError(f"No se pudo transcribir el audio (Groq {e.code}): {msg[:120]}")
+    except Exception as ex:
+        raise RuntimeError(f"No se pudo transcribir el audio: {ex}")
+
+
+class _STTWorker(QThread):
+    """Sube el WAV grabado a Groq Whisper en un hilo aparte (no bloquea la UI)."""
+    text_ready = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, key: str, wav_path: str, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self._wav_path = wav_path
+
+    def run(self):
+        try:
+            text = _transcribe_audio_groq(self._key, self._wav_path)
+            if text:
+                self.text_ready.emit(text)
+            else:
+                self.error_occurred.emit(
+                    "No detecté voz en la grabación — intenta de nuevo hablando "
+                    "un poco más cerca del micrófono.")
+        except Exception as ex:
+            self.error_occurred.emit(str(ex))
+        finally:
+            try: os.remove(self._wav_path)
+            except Exception: pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1402,6 +1737,14 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._MAX_RETRIES: int = 3
         self._retry_msg:   str = ""
 
+        # ── Modo de respuesta (voz): None = aún no se preguntó esta sesión ────
+        self._response_mode: Optional[str] = None   # "escrita" | "voz" | "ambas"
+        self._pending_first_message: str = ""
+        self._tts_worker:    Optional[_TTSWorker]  = None
+        self._record_worker: Optional[_RecordWorker] = None
+        self._stt_worker:    Optional[_STTWorker]  = None
+        self._recording: bool = False
+
         # ── Imagen de fondo ───────────────────────────────────────────────────
         import base64 as _b64
         _raw = _b64.b64decode(_AI_PANEL_BG_B64)
@@ -1628,7 +1971,31 @@ class AIAssistantPanel(QtWidgets.QWidget):
             sug_grid.addWidget(btn, row, col)
         root.addLayout(sug_grid)
 
-        # ── Input + botón enviar ──────────────────────────────────────────────
+        # ── Modo de respuesta: Escrita / Voz / Ambas ───────────────────────────
+        # Se pregunta una vez al primer mensaje de la sesión (ver _send_message /
+        # _ask_response_mode); esta misma fila queda visible después como
+        # selector para cambiar de modo sin volver a interrumpir con la pregunta.
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(4)
+        mode_lbl = QtWidgets.QLabel("🔊 Respuesta:")
+        mode_lbl.setStyleSheet("color:#7090c0; font-size:10px; background:transparent;")
+        self.btn_mode_escrita = QtWidgets.QPushButton("✍ Escrita")
+        self.btn_mode_voz     = QtWidgets.QPushButton("🔊 Voz")
+        self.btn_mode_ambas   = QtWidgets.QPushButton("✍🔊 Ambas")
+        for b in (self.btn_mode_escrita, self.btn_mode_voz, self.btn_mode_ambas):
+            b.setObjectName("clearBtn")
+            b.setCheckable(True)
+            b.setAutoExclusive(True)
+        self.btn_mode_escrita.clicked.connect(lambda: self._set_response_mode("escrita"))
+        self.btn_mode_voz.clicked.connect(lambda: self._set_response_mode("voz"))
+        self.btn_mode_ambas.clicked.connect(lambda: self._set_response_mode("ambas"))
+        mode_row.addWidget(mode_lbl)
+        mode_row.addWidget(self.btn_mode_escrita)
+        mode_row.addWidget(self.btn_mode_voz)
+        mode_row.addWidget(self.btn_mode_ambas)
+        root.addLayout(mode_row)
+
+        # ── Input + micrófono + botón enviar ───────────────────────────────────
         inp_row = QtWidgets.QHBoxLayout()
         inp_row.setSpacing(5)
         self.edt_msg = _ChatInput()
@@ -1636,12 +2003,21 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self.edt_msg.setPlaceholderText("Escribe tu pregunta sobre el optimizador…")
         self.edt_msg.returnPressed.connect(self._on_send)
 
+        self.btn_mic = QtWidgets.QPushButton("🎤")
+        self.btn_mic.setObjectName("clearBtn")
+        self.btn_mic.setToolTip("Grabar pregunta por voz (haz clic para empezar/detener)")
+        self.btn_mic.setEnabled(_REC_OK)
+        if not _REC_OK:
+            self.btn_mic.setToolTip("Grabación de voz no disponible (falta sounddevice)")
+        self.btn_mic.clicked.connect(self._toggle_recording)
+
         self.btn_send = QtWidgets.QPushButton("➤")
         self.btn_send.setObjectName("sendBtn")
         self.btn_send.clicked.connect(self._on_send)
         self.btn_send.setEnabled(False)
 
         inp_row.addWidget(self.edt_msg, 1)
+        inp_row.addWidget(self.btn_mic)
         inp_row.addWidget(self.btn_send)
         root.addLayout(inp_row)
 
@@ -1865,9 +2241,87 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self.edt_msg.clear()
         self._send_message(text)
 
+    # ─── Modo de respuesta (Escrita / Voz / Ambas) ─────────────────────────────
+    def _ask_response_mode(self):
+        self._append_system_msg(
+            "Antes de responder — ¿prefieres que te conteste por escrito, "
+            "en voz, o de ambas formas? Elige una opción junto al cuadro de "
+            "texto, abajo (puedes cambiarla cuando quieras).")
+
+    def _set_response_mode(self, mode: str):
+        self._response_mode = mode
+        if self._pending_first_message:
+            pending = self._pending_first_message
+            self._pending_first_message = ""
+            self._send_message(pending)
+
+    def _speak_response(self, text: str) -> None:
+        """Lee la respuesta en voz alta (SAPI5/pyttsx3) si el modo actual
+        incluye voz. No superpone dos lecturas si ya hay una en curso."""
+        if self._tts_worker and self._tts_worker.isRunning():
+            return
+        plain = _strip_markdown_for_speech(text)
+        if not plain:
+            return
+        self._tts_worker = _TTSWorker(plain, parent=self)
+        self._tts_worker.error_occurred.connect(self._on_tts_error)
+        self._tts_worker.start()
+
+    def _on_tts_error(self, msg: str) -> None:
+        self._append_system_msg(f"🔇 {msg}")
+
+    # ─── Entrada por voz (micrófono → Groq Whisper) ────────────────────────────
+    def _toggle_recording(self):
+        if self._recording:
+            if self._record_worker:
+                self._record_worker.stop()
+            self.btn_mic.setText("🎤")
+            self.btn_mic.setEnabled(False)  # se reactiva al terminar la transcripción
+            self._recording = False
+            return
+        if not self._api_key:
+            self._append_system_msg(
+                "⚠️ Conecta tu API Key primero (la transcripción de voz usa "
+                "el mismo proveedor Groq que el chat).")
+            return
+        self._recording = True
+        self.btn_mic.setText("🔴")
+        self._record_worker = _RecordWorker(parent=self)
+        self._record_worker.recording_ready.connect(self._on_recording_ready)
+        self._record_worker.error_occurred.connect(self._on_recording_error)
+        self._record_worker.start()
+
+    def _on_recording_ready(self, wav_path: str):
+        self.btn_mic.setText("🎤")
+        self.btn_mic.setEnabled(True)
+        self.edt_msg.setPlaceholderText("Transcribiendo tu voz…")
+        self._stt_worker = _STTWorker(self._api_key, wav_path, parent=self)
+        self._stt_worker.text_ready.connect(self._on_transcription_ready)
+        self._stt_worker.error_occurred.connect(self._on_transcription_error)
+        self._stt_worker.start()
+
+    def _on_recording_error(self, msg: str):
+        self.btn_mic.setText("🎤")
+        self.btn_mic.setEnabled(_REC_OK)
+        self._recording = False
+        self._append_system_msg(f"🎤 {msg}")
+
+    def _on_transcription_ready(self, text: str):
+        self.edt_msg.setPlaceholderText("Escribe tu pregunta sobre el optimizador…")
+        self.edt_msg.setText(text)
+        self.edt_msg.setFocus()
+
+    def _on_transcription_error(self, msg: str):
+        self.edt_msg.setPlaceholderText("Escribe tu pregunta sobre el optimizador…")
+        self._append_system_msg(f"🎤 {msg}")
+
     def _send_message(self, text: str, is_auto: bool = False):
         if not self._api_key:
             self._append_system_msg("⚠️ Conecta tu API Key primero.")
+            return
+        if self._response_mode is None and not is_auto:
+            self._pending_first_message = text
+            self._ask_response_mode()
             return
         if self._busy:
             # Encolar el mensaje — se procesará cuando llegue la respuesta
@@ -1905,6 +2359,9 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._busy = False
         self.btn_send.setEnabled(True)
         self.btn_send.setText("➤")
+
+        if self._response_mode in ("voz", "ambas"):
+            self._speak_response(text)
 
         # Procesar siguiente mensaje en cola con pequeño delay (evita rate limit)
         if self._msg_queue:
@@ -1994,6 +2451,12 @@ class AIAssistantPanel(QtWidgets.QWidget):
                         f'background-color:rgba(20,30,70,220);">'
                         f'&nbsp;&nbsp;{cline.replace(" ","&nbsp;")}</span>')
                     cursor.insertText('\n', blank)
+                cursor.insertText('\n', blank)
+                continue
+
+            # ── Tabla markdown ─────────────────────────────────────────────────
+            if btype == 'table':
+                cursor.insertHtml(_table_md_to_html(content))
                 cursor.insertText('\n', blank)
                 continue
 

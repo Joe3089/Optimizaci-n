@@ -144,7 +144,7 @@ def generate_plot_png(entry: dict) -> list:
             X1, X2 = np.meshgrid(g, g)
             Z = np.asarray(build_callable(fx, vrs[:2])(X1, X2), dtype=float)
             cf = ax.contourf(X1, X2, Z, levels=30, cmap='coolwarm', alpha=0.88)
-            ax.contour(X1, X2, Z, levels=12, colors='white', alpha=0.2, lw=0.5)
+            ax.contour(X1, X2, Z, levels=12, colors='white', alpha=0.2, linewidths=0.5)
             fig2.colorbar(cf, ax=ax, fraction=0.035, pad=0.04).ax.tick_params(colors="#7aaaea")
             if traj and len(traj)>=2 and traj[0].size>0:
                 px, py = traj[0], traj[1]

@@ -346,6 +346,12 @@ def _is_meta(m):      return m in METHODS_META
 def _is_multiobj(m):  return m in METHODS_MULTIOBJ
 def _is_1d_only(m):   return m in ("Búsqueda Local", "Fibonacci", "Sección Áurea",
                                      "Bisección", "Sección Dorada")
+# Los 6 métodos "MD" son técnicas de penalización/barrera/suma sobre g(x):
+# sin restricción, cada uno degenera silenciosamente en un simple Newton/BFGS
+# sin restricción bajo un nombre que promete otra cosa. Ver ejecutar() y
+# app.optimization.constrained.penalty_barrier (penalty_bfgs, steepest_bfgs,
+# nelder_mead, sum_bfgs) para la fórmula exacta de cada uno.
+METHODS_REQUIRE_CONSTRAINT = set(METHODS_MD)
 def _needs_x0(m):     return m in (METHODS_LS + METHODS_ND)
 def _needs_alpha(m):  return m in (
     "MO — Bisección",
@@ -1945,6 +1951,17 @@ class InterfazOptimizacion(QMW):
                     pass
 
             gx    = self.edt_gx.text().strip()
+            if m in METHODS_REQUIRE_CONSTRAINT and not gx:
+                QMsgBox.warning(self, "⚠ Falta la restricción g(x)",
+                    f"El método «{m}» aplica penalización/barrera/suma sobre "
+                    f"una restricción, así que necesita que definas g(x).\n\n"
+                    f"Ingresa una restricción (ej.: x1+x2-5) o, si tu problema "
+                    f"no tiene restricciones, usa en su lugar un método "
+                    f"multivariable sin restricción:\n"
+                    f"  • Grad. Conjugado, Newton-Raphson, Goldstein  — con vars + x₀\n"
+                    f"  • Armijo o Wolfe  — con vars + x₀\n"
+                    f"  • SA, PSO o GA  — metaheurísticos, solo con rango [lo,hi]")
+                return
             vars_ = _pvars(self.edt_vars.text()) or ["x1","x2"]
             x0    = _px0(self.edt_x0.text()) or [0.0,0.0]
             tol_L = 0.1

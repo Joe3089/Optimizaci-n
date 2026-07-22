@@ -189,11 +189,25 @@ def run_method(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
             f"(ej.: x**2 - 4*x + 5), sin notación LaTeX ni símbolos como "
             f"\\, $, {{ o }}.\n\nDetalle técnico: {ex}"
         ) from ex
-    except (RuntimeError, ValueError):
-        # Ya son mensajes deliberados y específicos de este proyecto (módulo
-        # no encontrado, número de variables incompatible con el método,
-        # entrada faltante, etc.) — se propagan sin cambios.
-        raise
+    except (RuntimeError, ValueError) as ex:
+        # Solo el tipo EXACTO RuntimeError/ValueError (no subclases) son los
+        # mensajes deliberados y específicos de este proyecto (módulo no
+        # encontrado, número de variables incompatible con el método,
+        # entrada faltante, etc.) — esos se propagan sin cambios. Subclases
+        # como sympy.printing.codeprinter.PrintMethodNotImplementedError
+        # (p.ej. al pedir la derivada de Abs(x), no diferenciable) heredan de
+        # RuntimeError pero son fugas técnicas de una librería, no mensajes
+        # pensados para el usuario — esas SÍ deben envolverse abajo.
+        if type(ex) in (RuntimeError, ValueError):
+            raise
+        raise FunctionIncompatibleError(
+            f"La función ingresada no es compatible con el método «{metodo}» "
+            f"(no se pudo aplicar este tipo de estudio a la expresión dada, "
+            f"por ejemplo por no ser derivable donde lo requiere el método).\n\n"
+            f"Verifica que esté escrita en formato válido de Python/Sympy "
+            f"(ej.: x**2 - 4*x + 5), sin notación LaTeX ni símbolos como "
+            f"\\, $, {{ o }}.\n\nDetalle técnico: {ex}"
+        ) from ex
     except Exception as ex:
         raise FunctionIncompatibleError(
             f"La función ingresada no es compatible con el método «{metodo}» "
@@ -528,17 +542,19 @@ def _run_method_impl(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
             "MD: Pes. (Nelder-Mead)":    "nelder_mead",
             "MD: Sum. (BFGS)":           "sum_bfgs",
         }
+        # NOTA: antes había aquí un fallback que, si la función mapeada no
+        # existía, silenciosamente sustituía otro algoritmo (típicamente
+        # penalty_method_newton) sin avisar — así "MD: Pes. (BFGS)" y
+        # similares corrían Newton+penalización bajo un nombre distinto
+        # durante mucho tiempo sin que nadie lo notara. Ahora, si falta la
+        # función, se rompe de forma ruidosa y clara en vez de mentir sobre
+        # qué algoritmo se ejecutó.
         fn_name = fn_map.get(metodo)
         fn = getattr(w, fn_name, None) if fn_name else None
         if fn is None:
-            if "Penalización" in metodo or "Pen." in metodo:
-                fn = getattr(w, "penalty_method_newton", None)
-            elif "Barrera" in metodo:
-                fn = getattr(w, "barrier_method_newton", None)
-            else:
-                fn = getattr(w, "penalty_method_newton", None)
-        if fn is None:
-            raise RuntimeError(f"Método '{metodo}' no implementado en wrappers.py.")
+            raise RuntimeError(
+                f"Método '{metodo}' no está implementado "
+                f"(falta '{fn_name}' en app.optimization.constrained.penalty_barrier).")
 
         # Llamada principal con firma correcta
         _,_,hist = fn(norm_fx, norm_gx, var_str, x0_md)
