@@ -20,7 +20,7 @@ from app.application import report_content
 
 
 def write_pdf(path: str, session: list, *,
-              area_key: str = "general", logo_path: str = None) -> None:
+              area_key: str | list[str] = "general", logo_path: str = None) -> None:
     """
     PDF profesional en A4 vertical:
       Pág 1: RESUMEN — descripción función, tipo, estudios aplicables,
@@ -29,12 +29,15 @@ def write_pdf(path: str, session: list, *,
              cálculos paso a paso y gráficas 2D / 3D.
     Todo ajustado a los márgenes del documento.
 
-    `area_key`: "general" muestra las 5 áreas de aplicación (comportamiento
-    de siempre); cualquier otra clave de `report_content.AREA_ORDER` muestra
-    solo esa área, con métodos recomendados/ventajas/beneficios/innovación.
+    `area_key`: acepta un str (compatibilidad) o una lista de claves
+    (selección múltiple vía checklist en la UI). "general" (o incluirla en
+    la lista) muestra las 5 áreas de `report_content.AREA_ORDER`; cualquier
+    subconjunto de claves específicas muestra solo esas, cada una con
+    métodos recomendados/ventajas/beneficios/innovación.
     `logo_path`: si se da y existe, se antepone como imagen antes del banner
     principal. Ninguno de los dos rompe el export si falta.
     """
+    area_keys_arg = [area_key] if isinstance(area_key, str) else (list(area_key) or ["general"])
     fx_global = session[0]["fx"] if session else ""
 
     # A4 vertical con márgenes estándar
@@ -188,19 +191,44 @@ def write_pdf(path: str, session: list, *,
         return HRFlowable(width="100%", thickness=thick,
                           color=cBorder, spaceBefore=4, spaceAfter=4)
 
-    def _banner_w(title, subtitle=""):
-        """Banner con fondo azul oscuro para la página de resumen."""
-        rows = [[Paragraph(title, sWTitle)]]
+    def _banner_w(title, subtitle="", logo_buf=None):
+        """
+        Banner con fondo azul oscuro para la página de resumen. Si se pasa
+        `logo_buf` (BytesIO de imagen), se integra en una columna propia
+        junto al título/subtítulo dentro de la misma tabla del encabezado,
+        en vez de quedar como una imagen suelta y descentrada encima del
+        banner.
+        """
+        title_cell = [Paragraph(title, sWTitle)]
         if subtitle:
-            rows.append([Paragraph(subtitle, sWSub)])
-        t = Table(rows, colWidths=[PW])
-        t.setStyle(TableStyle([
+            title_cell.append(Paragraph(subtitle, sWSub))
+
+        logo_img = None
+        if logo_buf is not None:
+            try:
+                logo_img = RLImg(logo_buf, width=1.7*cm, height=1.7*cm)
+            except Exception:
+                logo_img = None
+
+        if logo_img is not None:
+            rows = [[logo_img, title_cell]]
+            col_w = [2.4*cm, PW - 2.4*cm]
+        else:
+            rows = [[title_cell]]
+            col_w = [PW]
+
+        t = Table(rows, colWidths=col_w)
+        style = [
             ("BACKGROUND",    (0,0), (-1,-1), cDkBlue),
-            ("TOPPADDING",    (0,0), (-1,-1), 14),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 12),
+            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING",    (0,0), (-1,-1), 10),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 10),
             ("LEFTPADDING",   (0,0), (-1,-1), 14),
             ("RIGHTPADDING",  (0,0), (-1,-1), 14),
-        ]))
+        ]
+        if logo_img is not None:
+            style.append(("ALIGN", (0,0), (0,0), "CENTER"))
+        t.setStyle(TableStyle(style))
         return t
 
     def _section_box_w(content_rows, col_w=None):
@@ -253,43 +281,44 @@ def write_pdf(path: str, session: list, *,
 
     elems = []
 
-    # ── Logo (portada) ──────────────────────────────────────────────────
+    # ── Logo: integrado en la propia tabla del banner (no suelto encima) ──
     logo_buf = report_content.load_logo(logo_path)
-    if logo_buf is not None:
-        try:
-            elems.append(RLImg(logo_buf, width=2.2*cm, height=2.2*cm, hAlign="CENTER"))
-            elems.append(Spacer(1, 0.15*cm))
-        except Exception:
-            pass
 
     # ══════════════════════════════════════════════════════════════════
     # PÁGINA 1-2: RESUMEN GENERAL  (fondo blanco, letras negras)
     # ══════════════════════════════════════════════════════════════════
     elems.append(_banner_w(
         "Optimizador de Funciones",
-        f"Reporte de Análisis  ·  {len(session)} método(s) ejecutado(s)"))
+        f"Reporte de Análisis  ·  {len(session)} método(s) ejecutado(s)",
+        logo_buf=logo_buf))
     elems.append(Spacer(1, 0.3*cm))
 
     # ── 1. Función analizada ───────────────────────────────────────────
-    elems.append(_HR_w(1.5))
-    elems.append(Paragraph("1. Función Analizada", sWSecHdr))
+    # KeepTogether: título + tabla + descripción nunca se separan entre
+    # páginas (evita encabezado en una página y cuadro en la siguiente).
     tipo_fn = report_content.classify_function(fx_global)
-    elems.append(_section_box_w([
-        [Paragraph("Expresión:", sWLabel),  Paragraph(fx_global, sWVal)],
-        [Paragraph("Tipo:", sWLabel),        Paragraph(tipo_fn, sWVal)],
-        [Paragraph("Variables:", sWLabel),   Paragraph(", ".join(session[0]["vars"]), sWVal)],
-        [Paragraph("Dominio:", sWLabel),     Paragraph(f"[{session[0]['lo']:.4g},  {session[0]['hi']:.4g}]", sWVal)],
-    ]))
-    elems.append(Spacer(1, 0.2*cm))
     desc_fn = report_content.describe_function(fx_global)
-    elems.append(_full_box_w(Paragraph(desc_fn, sWBody)))
+    elems.append(KeepTogether([
+        _HR_w(1.5),
+        Paragraph("1. Función Analizada", sWSecHdr),
+        _section_box_w([
+            [Paragraph("Expresión:", sWLabel),  Paragraph(fx_global, sWVal)],
+            [Paragraph("Tipo:", sWLabel),        Paragraph(tipo_fn, sWVal)],
+            [Paragraph("Variables:", sWLabel),   Paragraph(", ".join(session[0]["vars"]), sWVal)],
+            [Paragraph("Dominio:", sWLabel),     Paragraph(f"[{session[0]['lo']:.4g},  {session[0]['hi']:.4g}]", sWVal)],
+        ]),
+        Spacer(1, 0.2*cm),
+        _full_box_w(Paragraph(desc_fn, sWBody)),
+    ]))
     elems.append(Spacer(1, 0.25*cm))
 
     # ── 2. Tipos de estudio aplicables ────────────────────────────────
-    elems.append(_HR_w(1.5))
-    elems.append(Paragraph("2. Tipos de Estudio Aplicables a la Función", sWSecHdr))
     desc_estudios = report_content.describe_applicable_studies(fx_global)
-    elems.append(_full_box_w(Paragraph(desc_estudios, sWBody)))
+    elems.append(KeepTogether([
+        _HR_w(1.5),
+        Paragraph("2. Tipos de Estudio Aplicables a la Función", sWSecHdr),
+        _full_box_w(Paragraph(desc_estudios, sWBody)),
+    ]))
     elems.append(Spacer(1, 0.25*cm))
 
     # ── 3. Métodos aplicados y justificación ──────────────────────────
@@ -301,6 +330,23 @@ def write_pdf(path: str, session: list, *,
         # KeepTogether: el encabezado azul y el cuerpo blanco
         # nunca se separan entre páginas
         elems.append(KeepTogether([_method_box_w(i, s["metodo"], justif)]))
+
+    # ── 3b. Problemas de Inventario (solo si algún método resolvió uno) ─
+    _inv_entries = [s for s in session if s.get("inventario_modelo")]
+    if _inv_entries:
+        elems.append(Spacer(1, 0.15*cm))
+        elems.append(_HR_w(1.5))
+        elems.append(Paragraph("Problemas de Inventario", sWSecHdr))
+        for s in _inv_entries:
+            im = s["inventario_modelo"]
+            extra_txt = "  ·  ".join(f"{k}: {v}" for k, v in im.get("extra_results", {}).items())
+            elems.append(Spacer(1, 0.1*cm))
+            elems.append(KeepTogether([
+                Paragraph(f"▸  {im.get('titulo','')}  (método: {s['metodo']})", sWConcH),
+                _full_box_w(Paragraph(
+                    f"{im.get('restricciones','')}<br/><b>Resultados:</b> {extra_txt}",
+                    sWConc)),
+            ]))
 
     elems.append(Spacer(1, 0.15*cm))
     elems.append(_HR_w(0.5))
@@ -333,6 +379,21 @@ def write_pdf(path: str, session: list, *,
                 ]),
                 Spacer(1, 0.2*cm),
             ]))
+
+            # ── Inventario: modelo resuelto por este método (si aplica) ─────
+            _inv_m = entry.get("inventario_modelo")
+            if _inv_m:
+                _inv_extra = "  ·  ".join(f"{k}: {v}" for k, v in _inv_m.get("extra_results", {}).items())
+                elems.append(KeepTogether([
+                    _HR(1.0, cBlue),
+                    Paragraph("Problema de Inventario", sSecHdr),
+                    _section_box([
+                        [Paragraph("Modelo:", sLabel), Paragraph(_inv_m.get("titulo",""), sVal)],
+                        [Paragraph("Restricciones:", sLabel), Paragraph(_inv_m.get("restricciones",""), sVal)],
+                        [Paragraph("Resultados:", sLabel), Paragraph(_inv_extra, sVal)],
+                    ]),
+                    Spacer(1, 0.2*cm),
+                ]))
 
             # ── Tabla de iteraciones ───────────────────────────────────────
             if hist:
@@ -577,31 +638,40 @@ def write_pdf(path: str, session: list, *,
                 ("LEFTPADDING",   (0,0), (-1,-1), 10),
                 ("RIGHTPADDING",  (0,0), (-1,-1), 10),
             ]))
-            elems.append(vt)
+            elems.append(KeepTogether([vt]))
 
         elems.append(Spacer(1, 0.25*cm))
 
-        # ── Utilidad futura (según la finalidad elegida por el usuario) ────
+        # ── Utilidad futura (según la(s) finalidad(es) elegida(s)) ─────────
         elems.append(_HR_w(1.5))
-        if area_key == "general":
+        if "general" in area_keys_arg:
             elems.append(Paragraph("Utilidad en Diversas Áreas a Futuro", sWSecHdr))
             area_keys_to_show = report_content.AREA_ORDER
-        else:
+        elif len(area_keys_arg) == 1:
             elems.append(Paragraph("Utilidad en el Área de Aplicación Seleccionada", sWSecHdr))
-            area_keys_to_show = [area_key]
+            area_keys_to_show = area_keys_arg
+        else:
+            elems.append(Paragraph("Utilidad en las Áreas de Aplicación Seleccionadas", sWSecHdr))
+            # Mantener el orden estable de AREA_ORDER entre las seleccionadas
+            area_keys_to_show = [k for k in report_content.AREA_ORDER if k in area_keys_arg]
 
         for key in area_keys_to_show:
             info = report_content.describe_area_utility(key)
-            elems.append(Spacer(1, 0.1*cm))
-            elems.append(Paragraph(f"▸  {info['titulo']}", sWConcH))
-            elems.append(_full_box_w(Paragraph(info["aplicacion"], sWConc)))
-            elems.append(Spacer(1, 0.1*cm))
-            elems.append(_section_box_w([
-                [Paragraph("Métodos recomendados:", sWLabel),
-                 Paragraph(", ".join(info["metodos_recomendados"]), sWVal)],
-                [Paragraph("Ventajas:", sWLabel), Paragraph(info["ventajas"], sWVal)],
-                [Paragraph("Beneficios:", sWLabel), Paragraph(info["beneficios"], sWVal)],
-                [Paragraph("Innovación:", sWLabel), Paragraph(info["innovacion"], sWVal)],
+            # KeepTogether: título + descripción + tabla de un área nunca se
+            # separan entre páginas (encabezado en una página y cuerpo en
+            # otra rompía la lectura del reporte).
+            elems.append(KeepTogether([
+                Spacer(1, 0.1*cm),
+                Paragraph(f"▸  {info['titulo']}", sWConcH),
+                _full_box_w(Paragraph(info["aplicacion"], sWConc)),
+                Spacer(1, 0.1*cm),
+                _section_box_w([
+                    [Paragraph("Métodos recomendados:", sWLabel),
+                     Paragraph(", ".join(info["metodos_recomendados"]), sWVal)],
+                    [Paragraph("Ventajas:", sWLabel), Paragraph(info["ventajas"], sWVal)],
+                    [Paragraph("Beneficios:", sWLabel), Paragraph(info["beneficios"], sWVal)],
+                    [Paragraph("Innovación:", sWLabel), Paragraph(info["innovacion"], sWVal)],
+                ]),
             ]))
 
         elems.append(Spacer(1, 0.3*cm))

@@ -110,6 +110,14 @@ except Exception:
     _sd = None
     _REC_OK = False
 
+# User-Agent de navegador para todas las llamadas HTTP a Groq/OpenRouter.
+# Sin esto, Cloudflare (delante de esas APIs) puede devolver 403 "error
+# code: 1010" (user agent blocked) — el default de urllib
+# ("Python-urllib/x.y") se detecta como bot, sobre todo en el endpoint de
+# transcripción de audio.
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
 import ssl as _ssl
 def _ssl_ctx():
     """
@@ -992,6 +1000,38 @@ necesitan una restricción para tener sentido — la app ya bloquea la ejecució
 Si el usuario da una función de 2+ variables para un método MO, la app la rechaza — estos
 métodos siempre parten de f(x) de 1 sola variable.
 
+### Módulo de Inventario (Problemas de Inventario) — 4 modelos:
+Se activan eligiendo "Inventario: …" en el combo de método (grupo "Inventario",
+al final). Al elegirlo aparece un panel con los parámetros propios del modelo;
+el usuario los llena, pulsa "Generar función de costo →" y luego "Calcular"
+como con cualquier otro método — el resto (tabla, gráficas, exportación) es
+exactamente el mismo motor de siempre, no hay nada especial que explicar ahí.
+- **Inventario: EOQ Clásico** — C(q)=(D/q)·S+(q/2)·H, q*=√(2DS/H). Parámetros:
+  D (demanda anual), S (costo de pedido), H (costo de mantenimiento). Compatible
+  con Búsqueda Local, Fibonacci, Sección Áurea/Dorada, Goldstein, Newton-Raphson,
+  Grad. Conjugado, Armijo, Wolfe (1 variable, convexa, sin restricción).
+- **Inventario: EOQ con Faltantes** — permite déficit planeado b≤q, penalizado
+  con B (costo de faltante). 2 variables (q,b) → solo Armijo, Wolfe o los 6
+  métodos MD (la restricción real es b−q≤0). NUNCA recomiendes Búsqueda Local,
+  Fibonacci o Sección Áurea/Dorada para este modelo — son estrictamente 1D.
+- **Inventario: EOQ con Descuentos** — precio unitario decrece por tramos de
+  cantidad; la función de costo es por tramos (Piecewise), no derivable en los
+  quiebres. Solo Búsqueda Local o metaheurísticas (SA/PSO/GA) — NUNCA
+  Newton-Raphson/Goldstein/Armijo/Wolfe/Grad. Conjugado (necesitan derivada
+  continua) ni Fibonacci/Sección Áurea/Dorada (asumen unimodalidad).
+- **Inventario: Punto de Reorden (ROP)** — demanda probabilística; calcula
+  ROP=μ_L+z·σ_L analíticamente (z = inversa de la normal en el nivel de
+  servicio) y además optimiza q* con la misma función del EOQ clásico
+  (mismos métodos compatibles que EOQ Clásico).
+Si el usuario menciona "inventario", "cantidad económica de pedido", "EOQ",
+"punto de reorden", "costo de mantenimiento", "demanda anual", "faltantes"/
+"backorders", "descuento por volumen/cantidad" o similar, identifica cuál de
+los 4 modelos encaja y recomienda activarlo por su nombre exacto de arriba,
+explicando brevemente por qué ese modelo (no otro) y qué algoritmo conviene
+dentro de los compatibles. Si pide un algoritmo incompatible con el modelo
+detectado, explica el motivo (variables, derivabilidad o restricción) y
+sugiere una alternativa compatible de la lista de ese modelo.
+
 ## FUNCIONES SOPORTADAS (sintaxis Python/SymPy):
 - Polinomiales: x**2 - 4*x + 5, 2*(x1-3)**2 + x1*x2**3
 - Trigonométricas: cos(x)*exp(-x**2), sin(x)/x
@@ -1011,6 +1051,8 @@ métodos siempre parten de f(x) de 1 sola variable.
 8. Diagnosticar por qué una función da error
 9. Explicar conceptos de convexidad, gradiente, Hessiano
 10. Guiar en la interpretación de gráficas 2D y 3D
+11. Detectar problemas de inventario (EOQ, faltantes, descuentos, punto de
+    reorden) y recomendar cuál de los 4 modelos del módulo de Inventario usar
 
 ## REGLA ABSOLUTA — FUERA DE DOMINIO:
 Solo rechaza con el mensaje de abajo cuando la consulta NO tenga NINGUNA relación con:
@@ -1193,7 +1235,8 @@ class _AIWorker(QThread):
             "https://api.groq.com/openai/v1/chat/completions",
             data=payload,
             headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {key}"},
+                     "Authorization": f"Bearer {key}",
+                     "User-Agent": _BROWSER_UA},
             method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
@@ -1251,6 +1294,7 @@ class _AIWorker(QThread):
                     "Authorization": f"Bearer {key}",
                     "HTTP-Referer" : "https://optimizer-app",
                     "X-Title"      : "Optimizador de Funciones",
+                    "User-Agent"   : _BROWSER_UA,
                 },
                 method = "POST")
             try:
@@ -1437,7 +1481,8 @@ def _transcribe_audio_groq(key: str, wav_path: str, language: str = "es") -> str
         "https://api.groq.com/openai/v1/audio/transcriptions",
         data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
-                 "Authorization": f"Bearer {key}"},
+                 "Authorization": f"Bearer {key}",
+                 "User-Agent": _BROWSER_UA},
         method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20, context=_ssl_ctx()) as resp:
@@ -1454,8 +1499,48 @@ def _transcribe_audio_groq(key: str, wav_path: str, language: str = "es") -> str
         raise RuntimeError(f"No se pudo transcribir el audio: {ex}")
 
 
+# ── Fallback offline/local de transcripción (Google Web Speech, gratuito) ──
+try:
+    import speech_recognition as _sr
+    _SR_OK = True
+except Exception:
+    _sr = None
+    _SR_OK = False
+
+
+def _transcribe_audio_local(wav_path: str, language: str = "es-ES") -> str:
+    """
+    Transcribe el WAV usando `speech_recognition` (API gratuita de Google
+    Web Speech, sin key). Se usa como respaldo automático cuando Groq falla
+    por bloqueo de red (403 en el endpoint de audio) — mismo WAV ya grabado
+    por sounddevice, sin volver a grabar.
+
+    Lanza RuntimeError con mensaje en español si la librería no está
+    instalada o si la transcripción falla.
+    """
+    if not _SR_OK:
+        raise RuntimeError(
+            "Transcripción local no disponible: instala 'SpeechRecognition' "
+            "con  pip install SpeechRecognition")
+    r = _sr.Recognizer()
+    with _sr.AudioFile(wav_path) as source:
+        audio = r.record(source)
+    try:
+        return (r.recognize_google(audio, language=language) or "").strip()
+    except _sr.UnknownValueError:
+        return ""
+    except _sr.RequestError as ex:
+        raise RuntimeError(f"Transcripción local no disponible (sin red): {ex}")
+
+
 class _STTWorker(QThread):
-    """Sube el WAV grabado a Groq Whisper en un hilo aparte (no bloquea la UI)."""
+    """
+    Sube el WAV grabado a Groq Whisper en un hilo aparte (no bloquea la UI).
+    Si Groq falla (p.ej. bloqueo de red 403 en el endpoint de audio), cae
+    automáticamente al fallback local (`_transcribe_audio_local`) antes de
+    reportar error — mismo patrón que `_AIWorker` ya usa para el chat de
+    texto (Groq → OpenRouter).
+    """
     text_ready = Signal(str)
     error_occurred = Signal(str)
 
@@ -1465,19 +1550,32 @@ class _STTWorker(QThread):
         self._wav_path = wav_path
 
     def run(self):
+        text = ""
+        groq_error = None
         try:
             text = _transcribe_audio_groq(self._key, self._wav_path)
-            if text:
-                self.text_ready.emit(text)
-            else:
-                self.error_occurred.emit(
-                    "No detecté voz en la grabación — intenta de nuevo hablando "
-                    "un poco más cerca del micrófono.")
         except Exception as ex:
-            self.error_occurred.emit(str(ex))
-        finally:
-            try: os.remove(self._wav_path)
-            except Exception: pass
+            groq_error = str(ex)
+
+        if not text and groq_error is not None:
+            try:
+                text = _transcribe_audio_local(self._wav_path)
+            except Exception as ex_local:
+                try: os.remove(self._wav_path)
+                except Exception: pass
+                self.error_occurred.emit(
+                    f"{groq_error}\nRespaldo local también falló: {ex_local}")
+                return
+
+        try: os.remove(self._wav_path)
+        except Exception: pass
+
+        if text:
+            self.text_ready.emit(text)
+        else:
+            self.error_occurred.emit(
+                "No detecté voz en la grabación — intenta de nuevo hablando "
+                "un poco más cerca del micrófono.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1604,6 +1702,14 @@ class AIAssistantPanel(QtWidgets.QWidget):
     Panel lateral/flotante con el chat del asistente de IA.
     Se integra directamente en la interfaz principal.
     """
+
+    # Se emite cuando la respuesta del asistente nombra explícitamente uno
+    # de los 4 modelos del módulo de Inventario (ver INVENTORY_METHOD_LABELS
+    # en app.ui.inventory_panel) — main_window la conecta para seleccionar
+    # ese método en el combo automáticamente. Disparo determinista (coincide
+    # con el nombre EXACTO que el propio prompt le pide usar a la IA), no
+    # una heurística de texto libre — evita cambios de método sorpresivos.
+    inventory_model_suggested = Signal(str)
 
     # ─── Estilos ──────────────────────────────────────────────────────────────
     _QSS = """
@@ -2354,6 +2460,19 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._remove_last_system_msg()
         self._retry_count = 0
         self._messages.append({"role": "assistant", "content": text})
+
+        # Si la IA nombró explícitamente uno de los 4 modelos del módulo de
+        # Inventario (el system prompt le pide usar el nombre EXACTO del
+        # combo), avisa a main_window para que lo active — coincidencia
+        # determinista de texto, no heurística de intención libre.
+        try:
+            from app.domain.inventory import INVENTORY_METHOD_LABELS
+            for label in INVENTORY_METHOD_LABELS:
+                if label in text:
+                    self.inventory_model_suggested.emit(label)
+                    break
+        except Exception:
+            pass
         if len(self._messages) > 20:
             self._messages = self._messages[-20:]
         self._busy = False
@@ -2590,10 +2709,15 @@ class AIAssistantPanel(QtWidgets.QWidget):
     def update_context(self, metodo: str = "", fx: str = "",
                        result_summary: str = "", n_iters: int = 0,
                        vars_: list = None, x0: list = None,
-                       lo: float = 0.0, hi: float = 5.0):
+                       lo: float = 0.0, hi: float = 5.0,
+                       inventario_info: str = ""):
         """
         Llamado por la ventana principal tras cada cálculo.
         Actualiza el contexto Y activa el botón Explicar si hay key y datos.
+        `inventario_info`: si el cálculo fue un modelo del módulo de
+        Inventario, resumen de sus valores analíticos/calculados (Q*, costo
+        total, ROP, etc.) — así la IA puede responder preguntas de
+        seguimiento sobre el resultado sin tener que recalcularlo.
         """
         parts = []
         if metodo:
@@ -2609,6 +2733,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
             parts.append(f"Iteraciones ejecutadas: {n_iters}")
         if result_summary:
             parts.append(f"Resultado: {result_summary}")
+        if inventario_info:
+            parts.append(f"Problema de inventario activo: {inventario_info}")
 
         self._context = "\n".join(parts) if parts else "Sin cálculo realizado aún."
 
@@ -2951,7 +3077,28 @@ class AIAssistantPanel(QtWidgets.QWidget):
                     .replace("&amp;amp;", "&amp;")   # evitar doble escape
                     )
 
-        def _inline_md(line: str) -> str:
+        def _contrast_text_color(bg_hex: str) -> str:
+            """
+            Color de texto (#111111 o #f5f5f5) con mejor contraste WCAG sobre
+            el fondo `bg_hex`. Evita el bug de texto casi invisible (p.ej.
+            amarillo sobre verde claro) si en el futuro cambia la paleta de
+            burbujas — el contraste se recalcula, no se fija a mano.
+            """
+            h = bg_hex.lstrip('#')
+            r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
+            def _lin(c):
+                c = c / 255.0
+                return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            lum = 0.2126*_lin(r) + 0.7152*_lin(g) + 0.0722*_lin(b)
+            return "#111111" if lum > 0.45 else "#f5f5f5"
+
+        # Color de texto para código inline, recalculado según el fondo real
+        # de cada burbuja (antes heredaba el color de la burbuja "a ciegas",
+        # lo que en algunas combinaciones resultaba casi ilegible).
+        _CODE_TXT_USER = _contrast_text_color("#dceeff")   # fondo burbuja usuario
+        _CODE_TXT_AI   = _contrast_text_color("#d6f5e3")   # fondo burbuja IA
+
+        def _inline_md(line: str, is_user: bool = False) -> str:
             """Convierte markdown inline a tags HTML de reportlab."""
             # Negrita+cursiva ***texto***
             line = re.sub(r'\*\*\*(.+?)\*\*\*',
@@ -2962,9 +3109,12 @@ class AIAssistantPanel(QtWidgets.QWidget):
             # Cursiva *texto* (no confundir con listas)
             line = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)',
                           lambda m: f'<i>{_esc(m.group(1))}</i>', line)
-            # Código inline `código`
+            # Código inline `código` — color explícito de alto contraste
+            # (antes heredaba el color de la burbuja y podía volverse
+            # ilegible según la combinación de colores).
+            code_color = _CODE_TXT_USER if is_user else _CODE_TXT_AI
             line = re.sub(r'`([^`]+)`',
-                          lambda m: (f'<font name="Courier" size="9">'
+                          lambda m: (f'<font name="Courier" size="9" color="{code_color}">'
                                      f'<b>{_esc(m.group(1))}</b></font>'), line)
             # Si la línea no tiene etiquetas HTML ya, escapar el resto
             # (ya se escapó arriba; sólo las partes fuera de las etiquetas)
@@ -3010,7 +3160,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
                                    fontName="Helvetica-Bold",
                                    textColor=C_USER_LABEL if is_user else C_AI_LABEL,
                                    spaceBefore=8, spaceAfter=3)
-                    items.append(Paragraph(_inline_md(htext), h_sty))
+                    items.append(Paragraph(_inline_md(htext, is_user), h_sty))
                     i += 1
                     continue
 
@@ -3024,7 +3174,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
                                  textColor=C_USER_TEXT if is_user else C_AI_TEXT,
                                  leftIndent=14 + indent_extra,
                                  firstLineIndent=-8, spaceAfter=2)
-                    items.append(Paragraph("• " + _inline_md(btext), bsty))
+                    items.append(Paragraph("• " + _inline_md(btext, is_user), bsty))
                     i += 1
                     continue
 
@@ -3039,7 +3189,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
                                  textColor=C_USER_TEXT if is_user else C_AI_TEXT,
                                  leftIndent=18 + indent_extra,
                                  firstLineIndent=-12, spaceAfter=2)
-                    items.append(Paragraph(f"{num}.  {_inline_md(ntext)}", nsty))
+                    items.append(Paragraph(f"{num}.  {_inline_md(ntext, is_user)}", nsty))
                     i += 1
                     continue
 
@@ -3051,7 +3201,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
                 # ── Texto normal ──────────────────────────────────────────
                 try:
-                    items.append(Paragraph(_inline_md(stripped), body_sty))
+                    items.append(Paragraph(_inline_md(stripped, is_user), body_sty))
                 except Exception:
                     # Si el HTML inline da error, insertar texto plano seguro
                     items.append(Paragraph(_esc(stripped), body_sty))
@@ -3063,18 +3213,27 @@ class AIAssistantPanel(QtWidgets.QWidget):
         #  BURBUJA DE MENSAJE  (tabla de 1 celda con fondo y borde)
         # ════════════════════════════════════════════════════════════════════
         def _bubble(inner_flowables: list, label_para, is_user: bool) -> Table:
+            """Burbuja como tabla de N filas (una por párrafo/bloque), no una
+            sola celda con todo el contenido — una celda no se puede partir
+            entre páginas, así que un mensaje largo (mayor a una página)
+            hacía fallar la exportación completa ("tallest cell ... too
+            large on page"). Con una fila por flowable, la tabla se parte
+            normalmente entre páginas como cualquier tabla de reportlab."""
             bg     = C_USER_BG     if is_user else C_AI_BG
             border = C_USER_BORDER if is_user else C_AI_BORDER
 
-            content_cell = [label_para] + inner_flowables
-            tbl = Table([[content_cell]], colWidths=[INNER_W])
+            rows = [[label_para]] + [[f] for f in inner_flowables]
+            n    = len(rows)
+            tbl  = Table(rows, colWidths=[INNER_W])
             tbl.setStyle(TableStyle([
                 ("BACKGROUND",  (0, 0), (-1, -1), bg),
                 ("BOX",         (0, 0), (-1, -1), 0.8, border),
                 ("LEFTPADDING",  (0, 0), (-1, -1), 10),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING",   (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING",(0, 0), (-1, -1), 8),
+                ("TOPPADDING",    (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING",    (0, 0), (-1, 0), 8),      # solo primera fila
+                ("BOTTOMPADDING", (0, n - 1), (-1, n - 1), 8),  # solo última
                 ("VALIGN",      (0, 0), (-1, -1), "TOP"),
             ]))
             return tbl

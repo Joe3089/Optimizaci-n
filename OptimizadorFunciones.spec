@@ -103,6 +103,9 @@ a = Analysis(
         'sounddevice',
         '_sounddevice_data',
         'wave',
+        # Fallback de transcripción de voz cuando Groq bloquea el endpoint
+        # de audio (403 de red) — API gratuita de Google Web Speech.
+        'speech_recognition',
     ],
     hookspath=[],
     hooksconfig={},

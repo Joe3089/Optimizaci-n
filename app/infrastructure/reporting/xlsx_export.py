@@ -99,16 +99,6 @@ def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
         fill=_fill(C["bg_dark"]), align=_center(), height=40)
     ws_r.row_dimensions[2].height = 6
 
-    # Logo (columna A, ensanchada de 3 a 6 para que quepa)
-    logo_buf = report_content.load_logo(logo_path, max_px=72)
-    if logo_buf is not None:
-        try:
-            xl_logo = XLImg(logo_buf)
-            xl_logo.width = xl_logo.height = 36
-            ws_r.add_image(xl_logo, "A1")
-        except Exception:
-            pass
-
     r = 3
     # ── Bloque: Función analizada ─────────────────────────────────────
     _merge_write(ws_r, f"B{r}:C{r}", "FUNCIÓN ANALIZADA",
@@ -171,6 +161,27 @@ def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
         r += 1
 
     ws_r.row_dimensions[r].height = 8; r += 1
+
+    # ── Bloque: Problemas de Inventario (solo si aplica) ──────────────
+    inv_entries = [s for s in session if s.get("inventario_modelo")]
+    if inv_entries:
+        _merge_write(ws_r, f"B{r}:C{r}", "PROBLEMAS DE INVENTARIO",
+            font=_font(bold=True, size=12, color=C["fg_cyan"]),
+            fill=_fill(C["bg_head2"]), align=_center(), height=24)
+        r += 1
+        for s in inv_entries:
+            im = s["inventario_modelo"]
+            ws_r.row_dimensions[r].height = 20
+            cl = ws_r.cell(row=r, column=2, value=s.get("metodo", ""))
+            cl.font = _font(bold=True, size=11, color=C["fg_blue"])
+            cl.fill = _fill(C["bg_mid"]); cl.alignment = _left(); cl.border = _border()
+            extra_txt = "  ·  ".join(f"{k}: {v}" for k, v in im.get("extra_results", {}).items())
+            cv = ws_r.cell(row=r, column=3, value=f"{im.get('titulo','')} — {extra_txt}")
+            cv.font = _font(size=10); cv.fill = _fill(C["bg_mid"])
+            cv.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            cv.border = _border()
+            r += 1
+        ws_r.row_dimensions[r].height = 8; r += 1
 
     # ── Pie ───────────────────────────────────────────────────────────
     _merge_write(ws_r, f"B{r}:C{r}",
@@ -241,6 +252,29 @@ def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
                 r_m += 1
 
             ws_m.row_dimensions[r_m].height = 6; r_m += 1
+
+            # ── Bloque Inventario (solo si este método resolvió un modelo
+            # del módulo de Inventario) ───────────────────────────────────
+            inv_model = entry.get("inventario_modelo")
+            if inv_model:
+                _merge_write(ws_m, f"B{r_m}:C{r_m}", "Problemas de Inventario",
+                    font=_font(bold=True, size=11, color=C["fg_cyan"]),
+                    fill=_fill(C["bg_head2"]), align=_center(), height=22)
+                r_m += 1
+                inv_rows = [("Modelo:", inv_model.get("titulo", "")),
+                            ("Restricciones:", inv_model.get("restricciones", ""))]
+                inv_rows += [(f"{k}:", str(v)) for k, v in inv_model.get("extra_results", {}).items()]
+                for lbl, val in inv_rows:
+                    ws_m.row_dimensions[r_m].height = 18
+                    cl = ws_m.cell(row=r_m, column=2, value=lbl)
+                    cl.font = _font(bold=True, size=10, color=C["fg_gold"])
+                    cl.fill = _fill(C["bg_resumen"]); cl.alignment = _left(); cl.border = _border()
+                    cv = ws_m.cell(row=r_m, column=3, value=val)
+                    cv.font = _font(size=10); cv.fill = _fill(C["bg_resumen"])
+                    cv.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                    cv.border = _border()
+                    r_m += 1
+                ws_m.row_dimensions[r_m].height = 6; r_m += 1
 
             # ── Bloque RESUMEN (resultados óptimos) ───────────────────────
             _merge_write(ws_m, f"B{r_m}:C{r_m}", "Resumen de Resultados",

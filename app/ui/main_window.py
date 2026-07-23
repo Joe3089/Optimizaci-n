@@ -171,6 +171,11 @@ def _get_ai_panel_cls():
             pass
     return _ai_panel_cls
 
+# ── Módulo de Inventario (activación dinámica — ver GROUPED_METHODS abajo) ────
+from app.ui.inventory_panel import (
+    InventoryPanel, INVENTORY_METHOD_LABELS, INVENTORY_LABEL_TO_KEY,
+)
+
 # ── Métodos ───────────────────────────────────────────────────────────────────
 METHODS_1D = ["Búsqueda Local", "Fibonacci", "Armijo", "Wolfe"]
 METHODS_MD = [
@@ -266,6 +271,7 @@ GROUPED_METHODS = [
         "MO — Peso Adaptativo",
         "MO — Punto de Referencia",
     ]),
+    ("Inventario", list(INVENTORY_METHOD_LABELS)),
 ]
 
 # Rol interno para marcar items de encabezado de categoría en el ComboBox
@@ -344,6 +350,7 @@ def _is_fib(m):       return m == "Fibonacci"
 def _is_heu(m):       return m in METHODS_HEU
 def _is_meta(m):      return m in METHODS_META
 def _is_multiobj(m):  return m in METHODS_MULTIOBJ
+def _is_inventario(m): return m in INVENTORY_METHOD_LABELS
 def _is_1d_only(m):   return m in ("Búsqueda Local", "Fibonacci", "Sección Áurea",
                                      "Bisección", "Sección Dorada")
 # Los 6 métodos "MD" son técnicas de penalización/barrera/suma sobre g(x):
@@ -393,6 +400,32 @@ def _find_bg(extra: list = None) -> str:
         "/mnt/user-data/outputs/Imgen_de_fondo.jpg",
     ]
     return next((p for p in cands if p and os.path.exists(p)), "")
+
+
+# ── Icono de flecha desplegable para QComboBox ────────────────────────────────
+def _ensure_combo_arrow_png() -> str:
+    """
+    Genera (una sola vez, cacheado en disco) un PNG con una flecha ▼ clara.
+    El QSS global no fija ``QComboBox::down-arrow``, así que Qt dibuja la
+    flecha nativa del estilo de Windows (oscura) — invisible sobre el fondo
+    azul marino de la app. Se reemplaza por esta flecha clara con buen
+    contraste, aplicada a todos los QComboBox (incluyendo los internos de
+    QInputDialog, que heredan el stylesheet de la ventana principal).
+    """
+    path = os.path.join(tempfile.gettempdir(), "optimizador_combo_arrow.png")
+    if os.path.exists(path):
+        return path.replace("\\", "/")
+    pix = QPixmap(12, 8)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(_AA("Antialiasing"))
+    arrow_color = QColor("#8fc4ff")
+    p.setBrush(QBrush(arrow_color))
+    p.setPen(arrow_color)
+    p.drawPolygon(QtGui.QPolygon([QPoint(1, 1), QPoint(11, 1), QPoint(6, 7)]))
+    p.end()
+    pix.save(path, "PNG")
+    return path.replace("\\", "/")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1029,7 +1062,7 @@ from app.application.report_content import (
     make_grid as _grid,
 )
 from app.application.optimization_service import run_method as _run_method
-from app.infrastructure.reporting import csv_export, xlsx_export, pdf_export
+from app.infrastructure.reporting import csv_export, xlsx_export, pdf_export, docx_export
 
 
 # ── Validación numérica ───────────────────────────────────────────────────────
@@ -1109,7 +1142,15 @@ class InterfazOptimizacion(QMW):
         # ── Ventana ───────────────────────────────────────────────────────────
         self.setWindowTitle("Optimizador de Funciones")
         self.setMinimumSize(1120, 700)
-        self.setStyleSheet(QSS)
+        _arrow_png = _ensure_combo_arrow_png()
+        _qss_final = QSS.replace(
+            "QComboBox::drop-down { border:none; width:20px; }",
+            "QComboBox::drop-down { border:none; width:20px; }\n"
+            f"QComboBox::down-arrow {{ image:url({_arrow_png}); "
+            "width:10px; height:7px; }\n"
+            "QComboBox::down-arrow:on { top:1px; }"
+        ) if _arrow_png else QSS
+        self.setStyleSheet(_qss_final)
 
         central = QW(); self.setCentralWidget(central)
         root = QHBox(central)
@@ -1193,13 +1234,14 @@ class InterfazOptimizacion(QMW):
         L.addWidget(self.cmb); L.addSpacing(3)
 
         # 2 — Función
-        L.addWidget(QLbl("Función f(x):"))
+        self.lbl_fx_title = QLbl("Función f(x):")
+        L.addWidget(self.lbl_fx_title)
         self.edt_fx = SpanishLineEdit(); self.edt_fx.setPlaceholderText("Ej: -(x-3)**2 + 10")
         L.addWidget(self.edt_fx)
 
         # 3 — Rango
         L.addSpacing(3)
-        rng = QW(); rl = QGrid(rng)
+        self.row_range = QW(); rng = self.row_range; rl = QGrid(rng)
         rl.setContentsMargins(0,0,0,0); rl.setSpacing(5)
         self.smin = QDSpin(); self.smax = QDSpin()
         for s in (self.smin,self.smax): s.setDecimals(6); s.setRange(-1e9,1e9)
@@ -1256,6 +1298,11 @@ class InterfazOptimizacion(QMW):
         self.edt_x0 = SpanishLineEdit(); self.edt_x0.setPlaceholderText("Ej: 0.5, 0.5  (opcional)")
         ml.addWidget(self.edt_x0)
         L.addWidget(self.md_sec); self.md_sec.setVisible(False)
+
+        # 5b — Módulo de Inventario (oculto hasta elegir un método "Inventario: …")
+        self.inv_panel = InventoryPanel()
+        self.inv_panel.built.connect(self._on_inventory_built)
+        L.addWidget(self.inv_panel)
 
         # 6 — Botones (en recuadro con borde rojo-acento)
         L.addSpacing(8)
@@ -1421,6 +1468,18 @@ class InterfazOptimizacion(QMW):
         self.cmb.currentTextChanged.connect(self._on_method)
         self.btn_ai.toggled.connect(self._toggle_ai_panel)
         self.btn_hist.clicked.connect(self._show_historial)
+        if self.ai_panel:
+            self.ai_panel.inventory_model_suggested.connect(self._on_ai_inventory_suggested)
+
+    def _on_ai_inventory_suggested(self, label: str):
+        """
+        La IA nombró explícitamente uno de los 4 modelos del módulo de
+        Inventario en su respuesta — activa ese método en el combo
+        automáticamente (mismo efecto que si el usuario lo eligiera a mano).
+        """
+        idx = self.cmb.findText(label)
+        if idx >= 0 and self.cmb.currentText() != label:
+            self.cmb.setCurrentIndex(idx)
 
     def _toggle_ai_panel(self, checked: bool):
         """Muestra u oculta el panel del asistente de IA."""
@@ -1443,6 +1502,18 @@ class InterfazOptimizacion(QMW):
         if not self.ai_panel:
             return
         try:
+            # Si el último cálculo fue un modelo de Inventario, arma un
+            # resumen legible de sus valores (Q*, costo, ROP…) para que la
+            # IA responda preguntas de seguimiento sin recalcular nada.
+            inv_info = ""
+            if self._session:
+                last = self._session[-1]
+                inv_model = last.get("inventario_modelo")
+                if inv_model:
+                    extra = inv_model.get("extra_results", {})
+                    inv_info = (f"{last.get('inventario_etiqueta', '')} — " +
+                               "  ·  ".join(f"{k}: {v}" for k, v in extra.items()))
+
             # 1. Actualizar contexto (siempre, aunque el panel no sea visible)
             self.ai_panel.update_context(
                 metodo         = self._metodo,
@@ -1453,6 +1524,7 @@ class InterfazOptimizacion(QMW):
                 x0             = self._x0,
                 lo             = self._lo,
                 hi             = self._hi,
+                inventario_info = inv_info,
             )
 
             # 2. Registrar método en la sesión para el botón "Comparar métodos"
@@ -1507,6 +1579,26 @@ class InterfazOptimizacion(QMW):
             self.edt_x0.setPlaceholderText("Opcional (el método genera población aleatoria)")
         elif _is_heu(m) or _is_ls(m):
             self.edt_x0.setPlaceholderText("Ej: 1.0  o  0.5, 0.5")
+
+        # ── Módulo de Inventario: activación dinámica ─────────────────────
+        # Oculto por completo (sin reservar espacio) salvo que el usuario
+        # elija uno de los 4 métodos "Inventario: …" del combo — al salir
+        # de ese modo, la función/rango genéricos vuelven a verse normal.
+        is_inv = _is_inventario(m)
+        self.inv_panel.setVisible(is_inv)
+        if is_inv:
+            self.inv_panel.set_model(INVENTORY_LABEL_TO_KEY.get(m))
+        self.lbl_fx_title.setVisible(not is_inv)
+        self.edt_fx.setVisible(not is_inv)
+        self.row_range.setVisible(not is_inv)
+
+    def _on_inventory_built(self, model: dict, algo: str):
+        """El panel de Inventario generó y validó la función de costo —
+        avisa en el status bar; `ejecutar()` la toma cuando el usuario
+        pulse Calcular (mismo botón/flujo de siempre)."""
+        self.lbl_st.setText(
+            f"✓ Función de inventario generada ({model['titulo']}) — "
+            f"pulsa Calcular con «{algo}»")
 
     # ── RESET ─────────────────────────────────────────────────────────────────
     def _reset(self):
@@ -1882,6 +1974,35 @@ class InterfazOptimizacion(QMW):
                     "Por favor selecciona un método de optimización antes de calcular.")
                 return
 
+            # ── Módulo de Inventario: sustituye f(x)/rango por los generados
+            # a partir de los parámetros del panel, y despacha con el
+            # algoritmo real elegido allí (no la etiqueta "Inventario: …").
+            # Todo lo demás (validación, cálculo, tabla, gráficas, sesión,
+            # exportación) sigue exactamente el mismo camino que cualquier
+            # otro método — no hay lógica de cálculo duplicada.
+            inv_active = _is_inventario(m)
+            inv_label  = m
+            if inv_active:
+                inv_model = self.inv_panel.current_model()
+                if not inv_model or self.inv_panel.model_key() != INVENTORY_LABEL_TO_KEY.get(m):
+                    QMsgBox.warning(self, "⚠ Falta generar la función",
+                        "Primero genera la función de costo con los parámetros de "
+                        "inventario (botón «Generar función de costo →») antes de calcular.")
+                    return
+                algo = self.inv_panel.selected_algorithm()
+                if not algo:
+                    QMsgBox.warning(self, "⚠ Falta el algoritmo",
+                        "Selecciona un algoritmo compatible en el panel de Inventario.")
+                    return
+                self.edt_fx.setText(inv_model["expr"])
+                self.edt_gx.setText(inv_model["gx"])
+                self.edt_vars.setText(" ".join(inv_model["var_names"]))
+                self.edt_x0.setText(", ".join(str(v) for v in inv_model["x0"]))
+                _bounds = inv_model["bounds"].values()
+                self.smin.setValue(min(b[0] for b in _bounds))
+                self.smax.setValue(max(b[1] for b in inv_model["bounds"].values()))
+                m = algo
+
             fx = self.edt_fx.text().strip()
             if not fx and m not in _MO_SCHAFFER_FIXED:
                 QMsgBox.warning(self, "⚠ Dato faltante",
@@ -2026,9 +2147,14 @@ class InterfazOptimizacion(QMW):
                 "lo": lo, "hi": hi, "hist": hist,
                 "traj": self._traj(self._vars, hist,
                                    x0 if (_is_md(m) or _is_ls(m)) else [lo]),
+                "inventario_modelo": (self.inv_panel.current_model() if inv_active else None),
+                "inventario_etiqueta": (inv_label if inv_active else None),
             })
             self._log_history(m, fx, hist)
             self.lbl_st.setText(f"✓ {m} → {self._rmsg(hist)}")
+            if inv_active:
+                self.lbl_st.setText(self.lbl_st.text() + f"  ·  {inv_label}")
+                self.inv_panel.show_results(self._session[-1])
             self._update_ai_context()
 
         except _NumericalWarning as nw:
@@ -2341,6 +2467,7 @@ class InterfazOptimizacion(QMW):
         m.addAction("📄 Exportar como CSV").triggered.connect(self.export_csv_db)
         m.addAction("📊 Exportar como Excel (.xlsx)").triggered.connect(self.export_xlsx)
         m.addAction("📑 Exportar como PDF").triggered.connect(self.export_pdf)
+        m.addAction("📝 Exportar como Word (.docx)").triggered.connect(self.export_docx)
         m.exec(self.btn_export.mapToGlobal(self.btn_export.rect().bottomLeft()))
 
     def _show_export_success(self, tipo: str, path: str, extra: str = ""):
@@ -3093,21 +3220,83 @@ class InterfazOptimizacion(QMW):
         ("robotica",   "Robótica y Control Automático"),
     ]
 
-    def _ask_area_finalidad(self) -> str:
-        """Pregunta al usuario la finalidad del estudio antes de exportar el
-        PDF; devuelve la clave de área ("general" si cancela)."""
-        labels = [lbl for _, lbl in self._AREA_OPTIONS]
-        choice, ok = QInputDlg.getItem(
-            self, "Finalidad del estudio",
-            "¿Para qué área quieres ver la aplicación de este estudio de la función?\n"
-            "(elige 'Estudio general' para ver las 5 áreas)",
-            labels, 0, False)
-        if not ok:
-            return "general"
-        for key, lbl in self._AREA_OPTIONS:
-            if lbl == choice:
-                return key
-        return "general"
+    def _ask_area_finalidad(self) -> List[str]:
+        """
+        Pregunta al usuario la(s) finalidad(es) del estudio antes de exportar
+        el PDF, con selección MÚLTIPLE (checklist). Devuelve la lista de
+        claves de área elegidas (["general"] si cancela o no marca nada).
+        "Estudio general" es mutuamente excluyente con las áreas específicas
+        (si se marca, desmarca/deshabilita las demás y viceversa).
+        """
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Finalidad del estudio")
+        dlg.setMinimumWidth(460)
+        dlg.setStyleSheet(
+            "QDialog{background:#0d1830;border:2px solid #1a50c0;border-radius:10px;}"
+            "QLabel{color:#d8e8f8;background:transparent;}"
+            "QListWidget{background:rgba(10,20,55,230);color:#dce8f8;"
+            "border:1px solid #2a3e6e;border-radius:5px;padding:4px;}"
+            "QListWidget::item{padding:6px 4px;}"
+            "QListWidget::item:selected{background:#1e4ea0;}"
+            "QPushButton{background:#1a50c0;color:#fff;border:none;border-radius:6px;"
+            "padding:9px 28px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#2462d8;}"
+            "QPushButton:disabled{background:#22345c;color:#6a7fa0;}"
+        )
+        lay = QVBox(dlg); lay.setContentsMargins(20, 18, 20, 18); lay.setSpacing(10)
+
+        lbl = QLbl(
+            "¿Para qué área(s) quieres ver la aplicación de este estudio de "
+            "la función?\n(puedes marcar varias, o 'Estudio general' para "
+            "ver las 5 áreas)")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+
+        lst = QtWidgets.QListWidget(dlg)
+        lst.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+                             if _QT == "PyQt6" else QtWidgets.QAbstractItemView.NoSelection)
+        _checked  = (Qt.CheckState.Checked   if _QT == "PyQt6" else Qt.Checked)
+        _unchecked= (Qt.CheckState.Unchecked if _QT == "PyQt6" else Qt.Unchecked)
+        items: List[QtWidgets.QListWidgetItem] = []
+        for key, label in self._AREA_OPTIONS:
+            it = QtWidgets.QListWidgetItem(label)
+            it.setFlags((it.flags() | Qt.ItemFlag.ItemIsUserCheckable) if _QT == "PyQt6"
+                        else (it.flags() | Qt.ItemIsUserCheckable))
+            it.setCheckState(_checked if key == "general" else _unchecked)
+            it.setData(Qt.ItemDataRole.UserRole if _QT == "PyQt6" else Qt.UserRole, key)
+            lst.addItem(it)
+            items.append(it)
+        lay.addWidget(lst)
+
+        def _on_changed(changed_item):
+            key = changed_item.data(Qt.ItemDataRole.UserRole if _QT == "PyQt6" else Qt.UserRole)
+            if changed_item.checkState() != _checked:
+                return
+            for it in items:
+                it_key = it.data(Qt.ItemDataRole.UserRole if _QT == "PyQt6" else Qt.UserRole)
+                if key == "general" and it_key != "general":
+                    it.setCheckState(_unchecked)
+                elif key != "general" and it_key == "general":
+                    it.setCheckState(_unchecked)
+        lst.itemChanged.connect(_on_changed)
+
+        btn_row = QHBox()
+        btn_ok = QBtn("  OK  "); btn_cancel = QBtn("  Cancelar  ")
+        btn_cancel.setStyleSheet("QPushButton{background:#2a3e6e;}QPushButton:hover{background:#3a5090;}")
+        btn_row.addStretch(); btn_row.addWidget(btn_ok); btn_row.addWidget(btn_cancel)
+        lay.addLayout(btn_row)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        result = dlg.exec() if _QT == "PyQt6" else dlg.exec_()
+        accepted = (QtWidgets.QDialog.DialogCode.Accepted if _QT == "PyQt6"
+                    else QtWidgets.QDialog.Accepted)
+        if result != accepted:
+            return ["general"]
+
+        chosen = [it.data(Qt.ItemDataRole.UserRole if _QT == "PyQt6" else Qt.UserRole)
+                  for it in items if it.checkState() == _checked]
+        return chosen or ["general"]
 
     def export_csv_db(self):
         """
@@ -3170,19 +3359,45 @@ class InterfazOptimizacion(QMW):
         except ImportError:
             QMsgBox.warning(self, "Dependencia", "pip install reportlab"); return
 
-        area_key = self._ask_area_finalidad()
+        area_keys = self._ask_area_finalidad()
 
         p, _ = QFD.getSaveFileName(self, "Guardar PDF", "reporte.pdf", "PDF (*.pdf)")
         if not p: return
 
         try:
             session = self._session_snapshot()
-            pdf_export.write_pdf(p, session, area_key=area_key, logo_path=self._logo_path())
+            pdf_export.write_pdf(p, session, area_key=area_keys, logo_path=self._logo_path())
             self._show_export_success(
                 "PDF", p,
                 f"Páginas: Resumen + {len(session)} método(s) con cálculos y gráficas")
         except Exception as e:
             _err(self, "Error PDF", str(e), traceback.format_exc())
+
+    def export_docx(self):
+        """
+        Exporta a Word profesional (ver
+        app.infrastructure.reporting.docx_export.write_docx).
+        """
+        if self.table.rowCount() == 0:
+            return self._nodata()
+        try:
+            import docx  # noqa: F401 — solo para el chequeo de dependencia
+        except ImportError:
+            QMsgBox.warning(self, "Dependencia", "pip install python-docx"); return
+
+        area_keys = self._ask_area_finalidad()
+
+        p, _ = QFD.getSaveFileName(self, "Guardar Word", "reporte.docx", "Word (*.docx)")
+        if not p: return
+
+        try:
+            session = self._session_snapshot()
+            docx_export.write_docx(p, session, area_key=area_keys, logo_path=self._logo_path())
+            self._show_export_success(
+                "Word (.docx)", p,
+                f"Secciones: Resumen + {len(session)} método(s) con cálculos y gráficas")
+        except Exception as e:
+            _err(self, "Error Word", str(e), traceback.format_exc())
 
 
 

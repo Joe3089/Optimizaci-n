@@ -16,6 +16,13 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.method_docs_data import METHODS, COMPAT_MATRIX, CATEGORIES  # noqa: E402
+from app.domain.inventory.catalog import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY  # noqa: E402
+
+# Funciones de inventario (Fase 6 del módulo de Inventario): mismo esquema
+# de diccionario que METHODS, así que se agregan sin tocar la lógica de
+# render de generate_docx/generate_pdf — solo aparece una categoría más.
+METHODS    = METHODS + INVENTORY_FUNCTIONS
+CATEGORIES = CATEGORIES + [INVENTORY_CATEGORY]
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -143,6 +150,7 @@ def generate_pdf(path: str) -> None:
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                                      Table, TableStyle, PageBreak, Image as RLImg)
     from xml.sax.saxutils import escape as _xesc
+    from scripts.pdf_cover import build_cover_elements
 
     styles = getSampleStyleSheet()
     h_title = ParagraphStyle("h_title", parent=styles["Title"], fontSize=22,
@@ -154,17 +162,17 @@ def generate_pdf(path: str) -> None:
     body = ParagraphStyle("bodyc", parent=styles["BodyText"], fontSize=9.3, leading=12.5)
     label = ParagraphStyle("labelc", parent=body, textColor=colors.HexColor("#1F4E79"))
 
+    M = 1.8 * cm
     doc = SimpleDocTemplate(path, pagesize=A4,
-                             leftMargin=1.8*cm, rightMargin=1.8*cm,
-                             topMargin=1.8*cm, bottomMargin=1.8*cm)
+                             leftMargin=M, rightMargin=M,
+                             topMargin=M, bottomMargin=M)
     elems = []
 
-    if os.path.exists(LOGO_PATH):
-        elems.append(RLImg(LOGO_PATH, width=3*cm, height=3*cm, hAlign="CENTER"))
-    elems.append(Spacer(1, 0.4*cm))
-    elems.append(Paragraph("Optimizador de Funciones", h_title))
-    elems.append(Paragraph("Documentación Técnica de Métodos de Optimización", styles["Heading2"]))
-    elems.append(Paragraph(f"Generado automáticamente — {date.today().isoformat()}", body))
+    elems += build_cover_elements(
+        LOGO_PATH, "Optimizador de Funciones",
+        "Documentación Técnica de Métodos de Optimización",
+        intro_text="", date_str=date.today().isoformat(),
+        page_size=A4, top_margin=M, bottom_margin=M)
     elems.append(PageBreak())
 
     elems.append(Paragraph("1. Introducción", h1))
