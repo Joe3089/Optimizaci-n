@@ -17,13 +17,13 @@ from app.domain.inventory.models import (
 )
 from app.domain.inventory.validation import validate_inventory_inputs
 from app.domain.inventory.catalog import (
-    INVENTORY_FUNCTIONS, INVENTORY_CATEGORY,
+    INVENTORY_FUNCTIONS, INVENTORY_CATEGORY, INVENTORY_REPORT_FIELDS,
     INVENTORY_MODEL_LABELS, INVENTORY_LABEL_TO_KEY, INVENTORY_METHOD_LABELS,
 )
 
 __all__ = [
     "eoq_clasico", "eoq_backorders", "eoq_descuentos", "rop_probabilistico",
     "MODEL_BUILDERS", "validate_inventory_inputs",
-    "INVENTORY_FUNCTIONS", "INVENTORY_CATEGORY",
+    "INVENTORY_FUNCTIONS", "INVENTORY_CATEGORY", "INVENTORY_REPORT_FIELDS",
     "INVENTORY_MODEL_LABELS", "INVENTORY_LABEL_TO_KEY", "INVENTORY_METHOD_LABELS",
 ]

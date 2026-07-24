@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImg
 
 from app.application import report_content
+from app.domain.inventory import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY, INVENTORY_REPORT_FIELDS
 
 # Duplicado deliberado de app.ui.main_window.METHODS_MD: ese registro es UI
 # (alimenta el combo de métodos) y esta capa no debe depender de la UI.
@@ -462,6 +463,39 @@ def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
                               value=f"[imagen no disponible: {ie}]")
 
                 r_m += IMG_ROWS + 1
+
+        # ══════════════════════════════════════════════════════════════
+        # PESTAÑA: Funciones Matemáticas para Problemas de Inventario
+        # (apéndice de referencia, siempre presente)
+        # ══════════════════════════════════════════════════════════════
+        ws_inv = wb.create_sheet("Inventario")
+        ws_inv.sheet_view.showGridLines = False
+        _set_col_width(ws_inv, 1, 3)
+        _set_col_width(ws_inv, 2, 26)
+        _set_col_width(ws_inv, 3, 70)
+
+        ws_inv.row_dimensions[1].height = 30
+        _merge_write(ws_inv, "B1:C1", INVENTORY_CATEGORY,
+            font=_font(bold=True, size=14), fill=_fill(C["bg_dark"]),
+            align=_center(), height=30)
+        r_i = 3
+        for fdict in INVENTORY_FUNCTIONS:
+            ws_inv.row_dimensions[r_i].height = 22
+            _merge_write(ws_inv, f"B{r_i}:C{r_i}", fdict["nombre"],
+                font=_font(bold=True, size=11, color=C["fg_cyan"]),
+                fill=_fill(C["bg_head2"]), align=_left(), height=22)
+            r_i += 1
+            for key, label in INVENTORY_REPORT_FIELDS:
+                ws_inv.row_dimensions[r_i].height = 20
+                cl = ws_inv.cell(row=r_i, column=2, value=label)
+                cl.font = _font(bold=True, size=10, color=C["fg_blue"])
+                cl.fill = _fill(C["bg_mid"]); cl.alignment = _left(); cl.border = _border()
+                cv = ws_inv.cell(row=r_i, column=3, value=str(fdict[key]))
+                cv.font = _font(size=10); cv.fill = _fill(C["bg_mid"])
+                cv.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                cv.border = _border()
+                r_i += 1
+            ws_inv.row_dimensions[r_i].height = 6; r_i += 1
 
         wb.save(path)
     except Exception:

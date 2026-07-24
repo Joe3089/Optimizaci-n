@@ -17,6 +17,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 from reportlab.platypus.flowables import HRFlowable
 
 from app.application import report_content
+from app.domain.inventory import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY, INVENTORY_REPORT_FIELDS
 
 
 def write_pdf(path: str, session: list, *,
@@ -198,6 +199,14 @@ def write_pdf(path: str, session: list, *,
         junto al título/subtítulo dentro de la misma tabla del encabezado,
         en vez de quedar como una imagen suelta y descentrada encima del
         banner.
+
+        Fondo: usa `cDark` (#0A1428, casi negro-azulado) en vez de
+        `cDkBlue` (#1A3A6A) — el logo (Menu/fondo_optimizacion.png) tiene
+        un fondo propio casi negro (~RGB 12,19,35), muy cercano a `cDark`
+        pero notablemente más oscuro que `cDkBlue`; con `cDkBlue` se veía
+        un recuadro oscuro alrededor del ícono que rompía la integración
+        visual. Con `cDark` el ícono se funde con el banner sin recuadro
+        visible, y el texto blanco del título gana aún más contraste.
         """
         title_cell = [Paragraph(title, sWTitle)]
         if subtitle:
@@ -219,7 +228,7 @@ def write_pdf(path: str, session: list, *,
 
         t = Table(rows, colWidths=col_w)
         style = [
-            ("BACKGROUND",    (0,0), (-1,-1), cDkBlue),
+            ("BACKGROUND",    (0,0), (-1,-1), cDark),
             ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
             ("TOPPADDING",    (0,0), (-1,-1), 10),
             ("BOTTOMPADDING", (0,0), (-1,-1), 10),
@@ -322,31 +331,32 @@ def write_pdf(path: str, session: list, *,
     elems.append(Spacer(1, 0.25*cm))
 
     # ── 3. Métodos aplicados y justificación ──────────────────────────
+    # El título de sección va DENTRO del primer KeepTogether — si no, puede
+    # quedar solo al final de una página con el primer método empujado a
+    # la siguiente (título aislado de su contenido).
     elems.append(_HR_w(1.5))
-    elems.append(Paragraph("3. Métodos Aplicados", sWSecHdr))
     for i, s in enumerate(session, 1):
         justif = report_content.justify_method(s["metodo"], fx_global)
-        elems.append(Spacer(1, 0.15*cm))
-        # KeepTogether: el encabezado azul y el cuerpo blanco
-        # nunca se separan entre páginas
-        elems.append(KeepTogether([_method_box_w(i, s["metodo"], justif)]))
+        block = [Paragraph("3. Métodos Aplicados", sWSecHdr)] if i == 1 else [Spacer(1, 0.15*cm)]
+        block.append(_method_box_w(i, s["metodo"], justif))
+        elems.append(KeepTogether(block))
 
     # ── 3b. Problemas de Inventario (solo si algún método resolvió uno) ─
     _inv_entries = [s for s in session if s.get("inventario_modelo")]
     if _inv_entries:
         elems.append(Spacer(1, 0.15*cm))
         elems.append(_HR_w(1.5))
-        elems.append(Paragraph("Problemas de Inventario", sWSecHdr))
-        for s in _inv_entries:
+        for idx_inv, s in enumerate(_inv_entries):
             im = s["inventario_modelo"]
             extra_txt = "  ·  ".join(f"{k}: {v}" for k, v in im.get("extra_results", {}).items())
-            elems.append(Spacer(1, 0.1*cm))
-            elems.append(KeepTogether([
+            block = [Paragraph("Problemas de Inventario", sWSecHdr)] if idx_inv == 0 else []
+            block += [
                 Paragraph(f"▸  {im.get('titulo','')}  (método: {s['metodo']})", sWConcH),
                 _full_box_w(Paragraph(
                     f"{im.get('restricciones','')}<br/><b>Resultados:</b> {extra_txt}",
                     sWConc)),
-            ]))
+            ]
+            elems.append(KeepTogether(block))
 
     elems.append(Spacer(1, 0.15*cm))
     elems.append(_HR_w(0.5))
@@ -575,7 +585,6 @@ def write_pdf(path: str, session: list, *,
 
         # ── Qué se hizo ────────────────────────────────────────────────────
         elems.append(_HR_w(1.5))
-        elems.append(Paragraph("¿Qué se realizó?", sWSecHdr))
         metodos_lista = ", ".join(s["metodo"] for s in session)
         n_iter_total  = sum(len(s.get("hist") or []) for s in session)
         qué_texto = (
@@ -591,12 +600,14 @@ def write_pdf(path: str, session: list, *,
             f"visualizan mediante gráficas 2D y 3D del comportamiento de la función "
             f"y la trayectoria de convergencia de cada método."
         )
-        elems.append(_full_box_w(Paragraph(qué_texto, sWConc)))
+        elems.append(KeepTogether([
+            Paragraph("¿Qué se realizó?", sWSecHdr),
+            _full_box_w(Paragraph(qué_texto, sWConc)),
+        ]))
         elems.append(Spacer(1, 0.25*cm))
 
         # ── Ventajas y beneficios ──────────────────────────────────────────
         elems.append(_HR_w(1.5))
-        elems.append(Paragraph("Ventajas y Beneficios", sWSecHdr))
 
         ventajas = [
             ("Diversidad metodológica",
@@ -621,8 +632,7 @@ def write_pdf(path: str, session: list, *,
              "verificadas en cada iteración, asegurando que el algoritmo avance "
              "hacia el óptimo sin pasos excesivamente grandes o pequeños."),
         ]
-        for titulo_v, texto_v in ventajas:
-            elems.append(Spacer(1, 0.1*cm))
+        for idx_v, (titulo_v, texto_v) in enumerate(ventajas):
             v_rows = [
                 [Paragraph(f"✦  {titulo_v}", sWLabel)],
                 [Paragraph(texto_v, sWConc)],
@@ -638,29 +648,36 @@ def write_pdf(path: str, session: list, *,
                 ("LEFTPADDING",   (0,0), (-1,-1), 10),
                 ("RIGHTPADDING",  (0,0), (-1,-1), 10),
             ]))
-            elems.append(KeepTogether([vt]))
+            block = [Paragraph("Ventajas y Beneficios", sWSecHdr)] if idx_v == 0 else [Spacer(1, 0.1*cm)]
+            block.append(vt)
+            elems.append(KeepTogether(block))
 
         elems.append(Spacer(1, 0.25*cm))
 
         # ── Utilidad futura (según la(s) finalidad(es) elegida(s)) ─────────
         elems.append(_HR_w(1.5))
         if "general" in area_keys_arg:
-            elems.append(Paragraph("Utilidad en Diversas Áreas a Futuro", sWSecHdr))
+            _util_heading = "Utilidad en Diversas Áreas a Futuro"
             area_keys_to_show = report_content.AREA_ORDER
         elif len(area_keys_arg) == 1:
-            elems.append(Paragraph("Utilidad en el Área de Aplicación Seleccionada", sWSecHdr))
+            _util_heading = "Utilidad en el Área de Aplicación Seleccionada"
             area_keys_to_show = area_keys_arg
         else:
-            elems.append(Paragraph("Utilidad en las Áreas de Aplicación Seleccionadas", sWSecHdr))
+            _util_heading = "Utilidad en las Áreas de Aplicación Seleccionadas"
             # Mantener el orden estable de AREA_ORDER entre las seleccionadas
             area_keys_to_show = [k for k in report_content.AREA_ORDER if k in area_keys_arg]
 
-        for key in area_keys_to_show:
+        for idx_area, key in enumerate(area_keys_to_show):
             info = report_content.describe_area_utility(key)
-            # KeepTogether: título + descripción + tabla de un área nunca se
-            # separan entre páginas (encabezado en una página y cuerpo en
-            # otra rompía la lectura del reporte).
-            elems.append(KeepTogether([
+            # KeepTogether: el título de la sección SIEMPRE viaja pegado al
+            # primer bloque de área (antes quedaba solo al final de una
+            # página, con el contenido empujado a la siguiente — título
+            # aislado). Título + descripción + tabla de un área nunca se
+            # separan entre páginas.
+            block = []
+            if idx_area == 0:
+                block.append(Paragraph(_util_heading, sWSecHdr))
+            block += [
                 Spacer(1, 0.1*cm),
                 Paragraph(f"▸  {info['titulo']}", sWConcH),
                 _full_box_w(Paragraph(info["aplicacion"], sWConc)),
@@ -672,7 +689,22 @@ def write_pdf(path: str, session: list, *,
                     [Paragraph("Beneficios:", sWLabel), Paragraph(info["beneficios"], sWVal)],
                     [Paragraph("Innovación:", sWLabel), Paragraph(info["innovacion"], sWVal)],
                 ]),
-            ]))
+            ]
+            elems.append(KeepTogether(block))
+
+        # ── Funciones Matemáticas para Problemas de Inventario (apéndice de
+        # referencia, siempre presente — igual que "Utilidad en áreas") ────
+        elems.append(Spacer(1, 0.25*cm))
+        elems.append(_HR_w(1.5))
+        for idx_f, fdict in enumerate(INVENTORY_FUNCTIONS):
+            rows = [[Paragraph(label, sWLabel), Paragraph(str(fdict[key]), sWVal)]
+                    for key, label in INVENTORY_REPORT_FIELDS]
+            block = [Paragraph(INVENTORY_CATEGORY, sWSecHdr)] if idx_f == 0 else [Spacer(1, 0.15*cm)]
+            block += [
+                Paragraph(f"▸  {fdict['nombre']}", sWConcH),
+                _section_box_w(rows),
+            ]
+            elems.append(KeepTogether(block))
 
         elems.append(Spacer(1, 0.3*cm))
         elems.append(_HR_w(1.0))

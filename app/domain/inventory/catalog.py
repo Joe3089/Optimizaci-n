@@ -2,11 +2,11 @@
 # Catálogo documental de las funciones de inventario — misma estructura de
 # diccionario que scripts/method_docs_data.py (una sola fuente de verdad),
 # para que el reporte maestro de funciones y generate_docs.py puedan listar
-# "Funciones para Problemas de Inventario" sin duplicar contenido ni tocar
+# "Funciones Matemáticas para Problemas de Inventario" sin duplicar contenido ni tocar
 # su lógica de render.
 from __future__ import annotations
 
-INVENTORY_CATEGORY = "Funciones para Problemas de Inventario"
+INVENTORY_CATEGORY = "Funciones Matemáticas para Problemas de Inventario"
 
 # (clave interna del modelo, etiqueta EXACTA mostrada en el combo de método
 # de main_window / usada por el system prompt de la IA para recomendar un
@@ -21,6 +21,19 @@ INVENTORY_MODEL_LABELS = [
 ]
 INVENTORY_LABEL_TO_KEY = {lbl: key for key, lbl in INVENTORY_MODEL_LABELS}
 INVENTORY_METHOD_LABELS = [lbl for _, lbl in INVENTORY_MODEL_LABELS]
+
+# Campos a mostrar en los reportes (PDF/Word/Excel) para cada función de
+# inventario — (clave del dict, etiqueta visible). Una sola fuente para los
+# 3 formatos de exportación, igual que INVENTORY_FUNCTIONS.
+INVENTORY_REPORT_FIELDS = [
+    ("formula",       "Ecuación"),
+    ("descripcion",   "Descripción"),
+    ("requisitos",    "Variables y Restricciones"),
+    ("cuando_usar",   "Aplicaciones"),
+    ("compatibles",   "Métodos Compatibles"),
+    ("incompatibles", "Métodos Incompatibles"),
+    ("convergencia",  "Explicación Matemática (Convergencia)"),
+]
 
 INVENTORY_FUNCTIONS = [
     dict(

@@ -1336,10 +1336,64 @@ class _AIWorker(QThread):
 _REC_SAMPLERATE = 16000  # Hz — suficiente para voz, tamaño de archivo razonable
 
 
+_GREEK_TO_SPEECH = {
+    "α": " alfa ", "β": " beta ", "γ": " gamma ", "δ": " delta ", "ε": " épsilon ",
+    "ζ": " zeta ", "η": " eta ", "θ": " theta ", "ι": " iota ", "κ": " kappa ",
+    "λ": " lambda ", "μ": " mu ", "ν": " nu ", "ξ": " xi ", "π": " pi ",
+    "ρ": " ro ", "σ": " sigma ", "τ": " tau ", "υ": " ípsilon ", "φ": " fi ",
+    "χ": " ji ", "ψ": " psi ", "ω": " omega ",
+    "Δ": " delta ", "Σ": " sumatoria de ", "Π": " productoria de ", "Φ": " fi ",
+}
+_SYMBOL_TO_SPEECH = [
+    ("∇", " nabla "), ("√", " raíz cuadrada de "), ("∑", " sumatoria de "),
+    ("∫", " integral de "), ("∞", " infinito "), ("±", " más menos "),
+    ("≤", " menor o igual que "), ("≥", " mayor o igual que "),
+    ("≠", " distinto de "), ("≈", " aproximadamente igual a "),
+    ("→", " tiende a "), ("×", " por "), ("÷", " dividido entre "),
+    ("‖", " norma de "), ("∂", " derivada parcial de "), ("∈", " pertenece a "),
+    ("∀", " para todo "), ("∃", " existe "), ("∅", " conjunto vacío "),
+    ("ᵀ", " transpuesta "), ("°", " grados "), ("·", " "),
+]
+
+
+def _math_exponents_subscripts_to_speech(s: str) -> str:
+    """
+    Convierte exponentes/subíndices (misma notación que usa
+    report_content.math_to_unicode/math_to_reportlab: x**2, x**{k+1}, x^n,
+    x_k, x_{k+1}) a palabras, ANTES de tocar markdown — así "x**2" se lee
+    "x al cuadrado" en vez de que el strip de negritas markdown (**texto**)
+    se coma el "**" y deje "x2" pegado, o que el TTS diga "asterisco".
+    """
+    def _exp(m):
+        base, exp = m.group(1), m.group(2).strip("{}")
+        if exp == "2": return f"{base} al cuadrado"
+        if exp == "3": return f"{base} al cubo"
+        return f"{base} elevado a {exp}"
+
+    def _sub(m):
+        base, idx = m.group(1), m.group(2).strip("{}")
+        idx_sp = {"0": "cero", "1": "uno", "2": "dos", "3": "tres"}.get(idx, idx)
+        return f"{base} sub {idx_sp}"
+
+    s = re.sub(r'([a-zA-Zα-ωΑ-Ω\)\]])\*\*(\{[^}]+\}|-?\d+(?:\.\d+)?)', _exp, s)
+    s = re.sub(r'([a-zA-Zα-ωΑ-Ω\)\]])\^(\{[^}]+\}|-?\d+)', _exp, s)
+    s = re.sub(r'([a-zA-Zα-ωΑ-Ω])_\{([^}]+)\}', _sub, s)
+    s = re.sub(r'([a-zA-Zα-ωΑ-Ω])_([a-zA-Z0-9\+\-]+)', _sub, s)
+    return s
+
+
 def _strip_markdown_for_speech(text: str) -> str:
-    """Limpia markdown/símbolos matemáticos para que el TTS no los lea en
-    voz alta literalmente (p. ej. no diga 'asterisco asterisco')."""
+    """
+    Limpia markdown y traduce notación matemática a palabras en español
+    para que el TTS (SAPI5) la pronuncie de forma natural — símbolos como
+    ∇, α, ≤, √ o exponentes/subíndices sonaban como "asterisco asterisco"
+    o simplemente se omitían.
+    """
     s = text
+    # 1) Exponentes/subíndices PRIMERO (usa "**"/"^"/"_" — deben resolverse
+    #    antes de que el strip de markdown toque esos mismos caracteres).
+    s = _math_exponents_subscripts_to_speech(s)
+    # 2) Markdown: bloques de código, negrita, cursiva, encabezados, viñetas
     s = re.sub(r'```.*?```', ' [bloque de código omitido] ', s, flags=re.DOTALL)
     s = re.sub(r'`([^`]+)`', r'\1', s)
     s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)
@@ -1347,6 +1401,16 @@ def _strip_markdown_for_speech(text: str) -> str:
     s = re.sub(r'^#{1,3}\s+', '', s, flags=re.MULTILINE)
     s = re.sub(r'^[•\-]\s+', '', s, flags=re.MULTILINE)
     s = re.sub(r'[_#>]', ' ', s)
+    # 3) Letras griegas y símbolos/operadores matemáticos → palabras
+    for gk, sp in _GREEK_TO_SPEECH.items():
+        s = s.replace(gk, sp)
+    for sym, sp in _SYMBOL_TO_SPEECH:
+        s = s.replace(sym, sp)
+    # 4) f(x) → "f de x" (notación de función más común en las respuestas)
+    s = re.sub(r'\bf\(([a-zA-Z0-9,\s]+)\)', r'f de \1', s)
+    # 5) Asterisco restante suele ser notación de punto óptimo (x*, f*)
+    s = re.sub(r'(?<=[a-zA-Zα-ωΑ-Ω])\*', ' óptimo', s)
+    s = re.sub(r'\*', ' ', s)   # cualquier otro asterisco suelto: fuera
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
@@ -1366,6 +1430,17 @@ def _find_spanish_voice(engine) -> Optional[str]:
     return None
 
 
+# ── Voice id cacheado ────────────────────────────────────────────────────
+# pyttsx3.init() en Windows (SAPI5) es barato, pero enumerar TODAS las
+# voces instaladas para encontrar una en español (_find_spanish_voice)
+# agrega decenas/cientos de ms en CADA respuesta hablada. Se cachea solo
+# el voice_id (un string, sin estado de hilo/COM) y se crea un engine
+# nuevo por llamada — evita compartir el objeto COM del engine entre hilos
+# distintos (cada _TTSWorker corre en su propio QThread; SAPI5/comtypes no
+# garantiza que un mismo engine sea seguro de usar desde otro hilo).
+_tts_voice_id_cache: Optional[str] = None
+
+
 class _TTSWorker(QThread):
     """Sintetiza y reproduce la respuesta en voz (SAPI5 vía pyttsx3), en un
     hilo aparte para no bloquear la UI mientras habla."""
@@ -1377,6 +1452,7 @@ class _TTSWorker(QThread):
         self._text = text
 
     def run(self):
+        global _tts_voice_id_cache
         if not _TTS_OK:
             self.error_occurred.emit(
                 "La síntesis de voz no está disponible en este equipo "
@@ -1384,7 +1460,9 @@ class _TTSWorker(QThread):
             return
         try:
             engine = pyttsx3.init()
-            voice_id = _find_spanish_voice(engine)
+            if _tts_voice_id_cache is None:
+                _tts_voice_id_cache = _find_spanish_voice(engine) or ""
+            voice_id = _tts_voice_id_cache
             if not voice_id:
                 self.error_occurred.emit(
                     "No encontré una voz en español instalada en Windows, así "
@@ -1397,6 +1475,7 @@ class _TTSWorker(QThread):
             engine.setProperty("rate", 178)
             engine.say(self._text)
             engine.runAndWait()
+            engine.stop()
             self.finished_speaking.emit()
         except Exception as ex:
             self.error_occurred.emit(f"No se pudo reproducir la voz: {ex}")
@@ -2413,9 +2492,20 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._append_system_msg(f"🎤 {msg}")
 
     def _on_transcription_ready(self, text: str):
+        """
+        Al terminar de transcribir, envía la solicitud automáticamente —
+        antes se dejaba el texto escrito en el cuadro esperando a que el
+        usuario presionara enviar, lo que hacía parecer que "grababa y
+        transcribía pero no respondía". Ahora graba → transcribe → envía →
+        responde según el modo (Escrito/Voz/Ambas) sin pasos adicionales;
+        si aún no hay modo elegido, _send_message pregunta una sola vez y
+        continúa sola en cuanto el usuario lo selecciona.
+        """
         self.edt_msg.setPlaceholderText("Escribe tu pregunta sobre el optimizador…")
-        self.edt_msg.setText(text)
-        self.edt_msg.setFocus()
+        if not text.strip():
+            return
+        self.edt_msg.clear()
+        self._send_message(text)
 
     def _on_transcription_error(self, msg: str):
         self.edt_msg.setPlaceholderText("Escribe tu pregunta sobre el optimizador…")

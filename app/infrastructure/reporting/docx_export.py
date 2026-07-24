@@ -14,13 +14,16 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 from app.application import report_content
+from app.domain.inventory import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY, INVENTORY_REPORT_FIELDS
 
 # ── Paleta (mismos tonos que pdf_export.py, adaptados a Word) ───────────────
 _C_DARK   = RGBColor(0x0A, 0x14, 0x28)
 _C_HEAD   = RGBColor(0x1A, 0x3A, 0x6A)
 _C_ACCENT = RGBColor(0x1A, 0x50, 0xC0)
 _C_GRAY   = RGBColor(0x55, 0x55, 0x55)
-_SHADE_HEAD  = "1A3A6A"
+_SHADE_HEAD  = "0A1428"   # casi negro-azulado — igual que pdf_export.py: el
+                          # logo tiene fondo propio casi negro y con un azul
+                          # más claro se veía un recuadro alrededor del ícono
 _SHADE_LIGHT = "F4F7FB"
 
 
@@ -281,6 +284,14 @@ def write_docx(path: str, session: list, *,
             ("Beneficios:", info["beneficios"]),
             ("Innovación:", info["innovacion"]),
         ])
+
+    # ── Funciones Matemáticas para Problemas de Inventario (apéndice de
+    # referencia, siempre presente) ─────────────────────────────────────
+    _heading(doc, INVENTORY_CATEGORY)
+    for fdict in INVENTORY_FUNCTIONS:
+        h = _heading(doc, f"▸ {fdict['nombre']}", size=12, color=_C_ACCENT)
+        _keep_block_together([h])
+        _label_value_table(doc, [(label, str(fdict[key])) for key, label in INVENTORY_REPORT_FIELDS])
 
     _body(doc, f"Reporte generado automáticamente por el Optimizador de Funciones "
               f"· {len(session)} método(s) analizado(s) · f(x) = {fx_global}",
