@@ -16,7 +16,10 @@ import sys
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.test_functions_data import TEST_FUNCTIONS, INCOMPATIBLE_TESTS  # noqa: E402
+from scripts.test_functions_data import (       # noqa: E402
+    TEST_FUNCTIONS, INCOMPATIBLE_TESTS,
+    INVENTORY_TESTS, INVENTORY_INCOMPATIBLE_TESTS,
+)
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -84,6 +87,38 @@ def generate_docx(path: str) -> None:
             r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
             para.add_run(t2[key])
 
+    doc.add_page_break()
+    doc.add_heading("3. Módulo de Inventario — modelos usados para probar cada uno", level=1)
+    for i, f in enumerate(INVENTORY_TESTS, start=1):
+        doc.add_heading(f"3.{i}  {f['funcion']}", level=2)
+        for label, key in (("Parámetros", "parametros"), ("Resultado", "resultado")):
+            para = doc.add_paragraph()
+            r = para.add_run(f"{label}: ")
+            r.bold = True
+            r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+            para.add_run(f[key])
+        para = doc.add_paragraph()
+        r = para.add_run("Aplica a: ")
+        r.bold = True
+        r.font.color.rgb = RGBColor(0x2E, 0x8B, 0x57)
+        para.add_run(", ".join(f["aplica_a"]))
+        para = doc.add_paragraph()
+        r = para.add_run("NO aplica a: ")
+        r.bold = True
+        r.font.color.rgb = RGBColor(0xB0, 0x30, 0x30)
+        para.add_run(" · ".join(f["no_aplica_a"]))
+
+    doc.add_page_break()
+    doc.add_heading("4. Inventario — validaciones y bloqueos verificados", level=1)
+    for i, t3 in enumerate(INVENTORY_INCOMPATIBLE_TESTS, start=1):
+        doc.add_heading(f"4.{i}  {t3['funcion']}  →  {t3['metodo']}", level=2)
+        for label, key in (("Motivo", "motivo"), ("Resultado en la app", "resultado_app")):
+            para = doc.add_paragraph()
+            r = para.add_run(f"{label}: ")
+            r.bold = True
+            r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+            para.add_run(t3[key])
+
     doc.save(path)
 
 
@@ -140,6 +175,24 @@ def generate_pdf(path: str) -> None:
         elems.append(Paragraph(f"2.{i}  {_xesc(t2['funcion'])}  &rarr;  {_xesc(t2['metodo'])}", h2))
         elems.append(Paragraph(f"<b><font color='#1F4E79'>Motivo:</font></b> {_xesc(t2['motivo'])}", body))
         elems.append(Paragraph(f"<b><font color='#1F4E79'>Resultado en la app:</font></b> {_xesc(t2['resultado_app'])}", body))
+        elems.append(Spacer(1, 0.25*cm))
+    elems.append(PageBreak())
+
+    elems.append(Paragraph("3. Módulo de Inventario — modelos usados para probar cada uno", h1))
+    for i, f in enumerate(INVENTORY_TESTS, start=1):
+        elems.append(Paragraph(f"3.{i}  {_xesc(f['funcion'])}", h2))
+        elems.append(Paragraph(f"<b><font color='#1F4E79'>Parámetros:</font></b> {_xesc(f['parametros'])}", body))
+        elems.append(Paragraph(f"<b><font color='#1F4E79'>Resultado:</font></b> {_xesc(f['resultado'])}", body))
+        elems.append(Paragraph(f"<b><font color='#2E8B57'>Aplica a:</font></b> {_xesc(', '.join(f['aplica_a']))}", body))
+        elems.append(Paragraph(f"<b><font color='#B03030'>NO aplica a:</font></b> {_xesc(' · '.join(f['no_aplica_a']))}", body))
+        elems.append(Spacer(1, 0.25*cm))
+    elems.append(PageBreak())
+
+    elems.append(Paragraph("4. Inventario — validaciones y bloqueos verificados", h1))
+    for i, t3 in enumerate(INVENTORY_INCOMPATIBLE_TESTS, start=1):
+        elems.append(Paragraph(f"4.{i}  {_xesc(t3['funcion'])}  &rarr;  {_xesc(t3['metodo'])}", h2))
+        elems.append(Paragraph(f"<b><font color='#1F4E79'>Motivo:</font></b> {_xesc(t3['motivo'])}", body))
+        elems.append(Paragraph(f"<b><font color='#1F4E79'>Resultado en la app:</font></b> {_xesc(t3['resultado_app'])}", body))
         elems.append(Spacer(1, 0.25*cm))
 
     doc.build(elems)

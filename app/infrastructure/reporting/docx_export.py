@@ -21,9 +21,7 @@ _C_DARK   = RGBColor(0x0A, 0x14, 0x28)
 _C_HEAD   = RGBColor(0x1A, 0x3A, 0x6A)
 _C_ACCENT = RGBColor(0x1A, 0x50, 0xC0)
 _C_GRAY   = RGBColor(0x55, 0x55, 0x55)
-_SHADE_HEAD  = "0A1428"   # casi negro-azulado — igual que pdf_export.py: el
-                          # logo tiene fondo propio casi negro y con un azul
-                          # más claro se veía un recuadro alrededor del ícono
+_SHADE_HEAD  = "1A3A6A"   # mismo azul que los demás encabezados del informe
 _SHADE_LIGHT = "F4F7FB"
 
 
@@ -95,12 +93,14 @@ def _banner(doc, title, subtitle=""):
     función visual que en pdf_export.py/xlsx_export.py)."""
     tbl = doc.add_table(rows=2 if subtitle else 1, cols=1)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _no_split_row(tbl.rows[0])
     cell = tbl.rows[0].cells[0]
     _shade_cell(cell, _SHADE_HEAD)
     p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run(title); run.bold = True; run.font.size = Pt(18)
     run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
     if subtitle:
+        _no_split_row(tbl.rows[1])
         cell2 = tbl.rows[1].cells[0]
         _shade_cell(cell2, _SHADE_HEAD)
         p2 = cell2.paragraphs[0]; p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -252,12 +252,18 @@ def write_docx(path: str, session: list, *,
                     bodies.append(_body(doc, report_content.math_to_unicode(line.strip()), size=9))
             _keep_block_together(bodies)
 
-        _heading(doc, "Gráficas", size=11)
+        graf_heading = _heading(doc, "Gráficas", size=11)
         try:
+            first_img = True
             for img_buf, lbl in report_content.generate_plot_png(entry):
-                _body(doc, lbl, size=9, color=_C_GRAY)
+                lbl_p = _body(doc, lbl, size=9, color=_C_GRAY)
                 p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p.add_run().add_picture(img_buf, width=Cm(15))
+                # Etiqueta + imagen siempre juntas; la primera además pegada
+                # al título "Gráficas" para que no quede huérfano.
+                block = [graf_heading, lbl_p, p] if first_img else [lbl_p, p]
+                _keep_block_together(block)
+                first_img = False
         except Exception:
             pass
 

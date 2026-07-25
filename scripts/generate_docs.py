@@ -15,7 +15,7 @@ import sys
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.method_docs_data import METHODS, COMPAT_MATRIX, CATEGORIES  # noqa: E402
+from scripts.method_docs_data import METHODS, COMPAT_MATRIX, CATEGORIES, AI_IMPLEMENTATION  # noqa: E402
 from app.domain.inventory.catalog import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY  # noqa: E402
 
 # Funciones de inventario (Fase 6 del módulo de Inventario): mismo esquema
@@ -136,6 +136,16 @@ def generate_docx(path: str) -> None:
         section_num += 1
         doc.add_page_break()
 
+    # Implementación del Agente de IA
+    doc.add_heading(f"{section_num}. Implementación del Agente de IA", level=1)
+    doc.add_paragraph(
+        "Esta sección documenta cómo está implementado y funcionando el "
+        "asistente conversacional dentro de la app (no es una descripción "
+        "genérica) — ver app/infrastructure/ai_assistant.py.")
+    for subtitulo, texto in AI_IMPLEMENTATION:
+        doc.add_heading(subtitulo, level=2)
+        doc.add_paragraph(texto)
+
     doc.save(path)
 
 
@@ -223,6 +233,18 @@ def generate_pdf(path: str) -> None:
             elems.append(Spacer(1, 0.25*cm))
         section_num += 1
         elems.append(PageBreak())
+
+    # Implementación del Agente de IA
+    elems.append(Paragraph(f"{section_num}. Implementación del Agente de IA", h1))
+    elems.append(Paragraph(
+        "Esta sección documenta cómo está implementado y funcionando el "
+        "asistente conversacional dentro de la app (no es una descripción "
+        "genérica) — ver app/infrastructure/ai_assistant.py.", body))
+    elems.append(Spacer(1, 0.2*cm))
+    for subtitulo, texto in AI_IMPLEMENTATION:
+        elems.append(Paragraph(_xesc(subtitulo), h2))
+        elems.append(Paragraph(_xesc(texto), body))
+        elems.append(Spacer(1, 0.2*cm))
 
     doc.build(elems)
 

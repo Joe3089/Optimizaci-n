@@ -1442,14 +1442,57 @@ _tts_voice_id_cache: Optional[str] = None
 
 
 class _TTSWorker(QThread):
-    """Sintetiza y reproduce la respuesta en voz (SAPI5 vía pyttsx3), en un
-    hilo aparte para no bloquear la UI mientras habla."""
+    """
+    Sintetiza y reproduce la respuesta en voz (SAPI5 vía pyttsx3), en un
+    hilo aparte para no bloquear la UI mientras habla.
+
+    Expone pause()/resume()/request_stop() para el reproductor compacto
+    (TAREA 5). pyttsx3 no expone pausa/reanudación en su API pública, pero
+    el objeto COM subyacente (ISpVoice de SAPI5, en
+    `engine.proxy._driver._tts`) sí tiene Pause()/Resume() nativos — se usa
+    ese acceso interno (con try/except: si algún día cambia la versión de
+    pyttsx3 y deja de existir, se degrada a comportamiento de solo-stop en
+    vez de romper la app).
+    """
     error_occurred = Signal(str)
     finished_speaking = Signal()
 
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         self._text = text
+        self._engine = None
+        self._sapi_voice = None
+        self._user_stopped = False
+
+    def pause(self) -> bool:
+        """True si se pudo pausar de forma nativa (SAPI ISpVoice.Pause)."""
+        if self._sapi_voice is not None:
+            try:
+                self._sapi_voice.Pause()
+                return True
+            except Exception:
+                pass
+        return False
+
+    def resume(self) -> bool:
+        if self._sapi_voice is not None:
+            try:
+                self._sapi_voice.Resume()
+                return True
+            except Exception:
+                pass
+        return False
+
+    def request_stop(self):
+        self._user_stopped = True
+        try:
+            if self._sapi_voice is not None:
+                self._sapi_voice.Resume()   # si estaba pausado, stop() no surtiría efecto
+        except Exception:
+            pass
+        if self._engine is not None:
+            try: self._engine.stop()
+            except Exception: pass
 
     def run(self):
         global _tts_voice_id_cache
@@ -1460,6 +1503,11 @@ class _TTSWorker(QThread):
             return
         try:
             engine = pyttsx3.init()
+            self._engine = engine
+            try:
+                self._sapi_voice = engine.proxy._driver._tts
+            except Exception:
+                self._sapi_voice = None
             if _tts_voice_id_cache is None:
                 _tts_voice_id_cache = _find_spanish_voice(engine) or ""
             voice_id = _tts_voice_id_cache
@@ -1476,9 +1524,13 @@ class _TTSWorker(QThread):
             engine.say(self._text)
             engine.runAndWait()
             engine.stop()
-            self.finished_speaking.emit()
+            if not self._user_stopped:
+                self.finished_speaking.emit()
         except Exception as ex:
             self.error_occurred.emit(f"No se pudo reproducir la voz: {ex}")
+        finally:
+            self._engine = None
+            self._sapi_voice = None
 
 
 class _RecordWorker(QThread):
@@ -1926,6 +1978,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._response_mode: Optional[str] = None   # "escrita" | "voz" | "ambas"
         self._pending_first_message: str = ""
         self._tts_worker:    Optional[_TTSWorker]  = None
+        self._tts_last_text: str = ""    # último texto hablado — permite re-play tras Detener
+        self._tts_paused:    bool = False
         self._record_worker: Optional[_RecordWorker] = None
         self._stt_worker:    Optional[_STTWorker]  = None
         self._recording: bool = False
@@ -2179,6 +2233,33 @@ class AIAssistantPanel(QtWidgets.QWidget):
         mode_row.addWidget(self.btn_mode_voz)
         mode_row.addWidget(self.btn_mode_ambas)
         root.addLayout(mode_row)
+
+        # ── Reproductor compacto (Play/Pausa/Detener) ───────────────────────
+        # Oculto por completo salvo que el modo de respuesta sea Voz o Ambas
+        # (TAREA 5). Controla la reproducción en curso sin volver a llamar
+        # al LLM ni regenerar la respuesta — actúa solo sobre el audio ya
+        # sintetizado por _TTSWorker.
+        self.player_row = QtWidgets.QWidget()
+        pr = QtWidgets.QHBoxLayout(self.player_row)
+        pr.setContentsMargins(0, 2, 0, 2); pr.setSpacing(4)
+        player_lbl = QtWidgets.QLabel("🎧 Reproductor:")
+        player_lbl.setStyleSheet("color:#7090c0; font-size:10px; background:transparent;")
+        self.btn_player_playpause = QtWidgets.QPushButton("▶")
+        self.btn_player_stop = QtWidgets.QPushButton("⏹")
+        for b in (self.btn_player_playpause, self.btn_player_stop):
+            b.setObjectName("clearBtn")
+            b.setFixedWidth(30)
+        self.btn_player_playpause.setToolTip("Reproducir / Pausar")
+        self.btn_player_stop.setToolTip("Detener")
+        self.btn_player_playpause.clicked.connect(self._on_player_playpause)
+        self.btn_player_stop.clicked.connect(self._on_player_stop)
+        self.btn_player_stop.setEnabled(False)
+        pr.addWidget(player_lbl)
+        pr.addWidget(self.btn_player_playpause)
+        pr.addWidget(self.btn_player_stop)
+        pr.addStretch()
+        root.addWidget(self.player_row)
+        self.player_row.setVisible(False)
 
         # ── Input + micrófono + botón enviar ───────────────────────────────────
         inp_row = QtWidgets.QHBoxLayout()
@@ -2435,6 +2516,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
     def _set_response_mode(self, mode: str):
         self._response_mode = mode
+        # Reproductor (TAREA 5): visible SOLO con Voz/Ambas, oculto con Escrita.
+        self.player_row.setVisible(mode in ("voz", "ambas"))
         if self._pending_first_message:
             pending = self._pending_first_message
             self._pending_first_message = ""
@@ -2448,12 +2531,55 @@ class AIAssistantPanel(QtWidgets.QWidget):
         plain = _strip_markdown_for_speech(text)
         if not plain:
             return
-        self._tts_worker = _TTSWorker(plain, parent=self)
+        self._tts_last_text = plain   # para que "▶" pueda re-reproducir tras Detener
+        self._tts_paused = False
+        self._start_tts_worker(plain)
+
+    def _start_tts_worker(self, text: str) -> None:
+        self._tts_worker = _TTSWorker(text, parent=self)
         self._tts_worker.error_occurred.connect(self._on_tts_error)
+        self._tts_worker.finished_speaking.connect(self._on_tts_finished)
         self._tts_worker.start()
+        self.btn_player_playpause.setText("⏸")
+        self.btn_player_stop.setEnabled(True)
+
+    # ─── Reproductor: Play/Pausa/Detener ────────────────────────────────────
+    def _on_player_playpause(self):
+        w = self._tts_worker
+        if w and w.isRunning() and not self._tts_paused:
+            # Reproduciendo → pausar
+            if w.pause():
+                self._tts_paused = True
+                self.btn_player_playpause.setText("▶")
+            return
+        if w and w.isRunning() and self._tts_paused:
+            # Pausado → reanudar desde el mismo punto (nativo, sin resintetizar)
+            if w.resume():
+                self._tts_paused = False
+                self.btn_player_playpause.setText("⏸")
+            return
+        # Nada reproduciéndose: (re)iniciar con el último texto hablado
+        if self._tts_last_text:
+            self._start_tts_worker(self._tts_last_text)
+
+    def _on_player_stop(self):
+        w = self._tts_worker
+        if w and w.isRunning():
+            w.request_stop()
+        self._tts_paused = False
+        self.btn_player_playpause.setText("▶")
+        self.btn_player_stop.setEnabled(False)
+
+    def _on_tts_finished(self):
+        self._tts_paused = False
+        self.btn_player_playpause.setText("▶")
+        self.btn_player_stop.setEnabled(False)
 
     def _on_tts_error(self, msg: str) -> None:
         self._append_system_msg(f"🔇 {msg}")
+        self._tts_paused = False
+        self.btn_player_playpause.setText("▶")
+        self.btn_player_stop.setEnabled(False)
 
     # ─── Entrada por voz (micrófono → Groq Whisper) ────────────────────────────
     def _toggle_recording(self):

@@ -6,7 +6,13 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 
 from app.ui.splash_screen import SplashScreen
-from app.ui.main_window import InterfazOptimizacion
+# InterfazOptimizacion NO se importa aquí arriba a propósito: ese import por
+# sí solo arrastra sympy/matplotlib/numpy/reportlab/openpyxl/python-docx y
+# tarda ~2-4s. Si estuviera aquí, bloquearía la app ANTES de poder mostrar
+# el splash — el usuario vería una ventana en blanco/nada al hacer doble
+# clic. Se importa de forma diferida dentro de iniciar_interfaz(), que se
+# llama recién cuando el splash YA está pintado en pantalla (percepción de
+# apertura inmediata mientras la carga pesada ocurre detrás).
 
 
 def resource_path(relative_path: str) -> str:
@@ -16,6 +22,7 @@ def resource_path(relative_path: str) -> str:
 
 
 def iniciar_interfaz():
+    from app.ui.main_window import InterfazOptimizacion
     app.main_window = InterfazOptimizacion(resource_path=resource_path)
     app.main_window.show()
 

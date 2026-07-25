@@ -17,6 +17,29 @@ class SplashScreen(QWidget):
         self.setFixedSize(900, 520)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
+        # Botón minimizar: la portada es frameless (sin barra de título del
+        # SO), así que no tiene minimizar/cerrar nativos — se agrega uno
+        # propio en la esquina superior derecha para poder minimizarla
+        # mientras queda esperando el clic en "Iniciar aplicación".
+        self.btn_min = QPushButton("─", self)
+        self.btn_min.setGeometry(900 - 44, 12, 32, 28)
+        self.btn_min.setCursor(Qt.PointingHandCursor)
+        self.btn_min.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,30);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: rgba(255,255,255,70); }
+            QPushButton:pressed { background: rgba(255,255,255,100); }
+        """)
+        self.btn_min.setToolTip("Minimizar")
+        self.btn_min.clicked.connect(self.showMinimized)
+        self.btn_min.raise_()
+
         # Intentar cargar imagen de fondo si existe
         self._bg_pixmap = None
         for candidate in [
@@ -116,6 +139,7 @@ class SplashScreen(QWidget):
         self.anim.setDuration(700)
         self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.btn.clicked.connect(self._start)
+        self._started = False
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -167,6 +191,11 @@ class SplashScreen(QWidget):
         self.move((screen.width()  - self.width())  // 2,
                   (screen.height() - self.height()) // 2)
         QTimer.singleShot(100, self._animate_btn)
+        # Sin auto-arranque: la portada debe quedarse en pantalla hasta que
+        # el usuario pulse "Iniciar aplicación" — lo único que se optimizó
+        # fue que la portada APAREZCA rápido tras el doble clic (el import
+        # pesado de main_window está diferido a iniciar_interfaz(), fuera
+        # de este archivo, y solo se dispara al presionar el botón).
 
     def _animate_btn(self):
         g = self.btn.geometry()
@@ -176,6 +205,9 @@ class SplashScreen(QWidget):
         self.anim.start()
 
     def _start(self):
+        if self._started:
+            return
+        self._started = True
         self.close()
         if callable(self.on_start_callback):
             self.on_start_callback()

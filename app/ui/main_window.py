@@ -39,6 +39,8 @@ def _WA(name):
     return getattr(Qt.WidgetAttribute, name) if _QT=="PyQt6" else getattr(Qt, name)
 def _AA(name):
     return getattr(QPainter.RenderHint, name) if _QT=="PyQt6" else getattr(QPainter, name)
+def _WF(name):
+    return getattr(Qt.WindowType, name) if _QT=="PyQt6" else getattr(Qt, name)
 def _AL(*names):
     if _QT=="PyQt6":
         f=Qt.AlignmentFlag; r=getattr(f,names[0])
@@ -1062,7 +1064,37 @@ from app.application.report_content import (
     make_grid as _grid,
 )
 from app.application.optimization_service import run_method as _run_method
-from app.infrastructure.reporting import csv_export, xlsx_export, pdf_export, docx_export
+
+# ── Exportaciones (carga LAZY) ────────────────────────────────────────────────
+# reportlab/openpyxl/python-docx suman ~2.2s de import solo entre los tres —
+# solo hacen falta si el usuario realmente exporta algo, así que no se cargan
+# al abrir la app (TAREA: optimizar tiempo de inicio / diferir módulos
+# secundarios). Mismo patrón lazy que _get_fc()/_get_ai_panel_cls() de arriba.
+_csv_export_mod = _xlsx_export_mod = _pdf_export_mod = _docx_export_mod = None
+def _get_csv_export():
+    global _csv_export_mod
+    if _csv_export_mod is None:
+        from app.infrastructure.reporting import csv_export as _m
+        _csv_export_mod = _m
+    return _csv_export_mod
+def _get_xlsx_export():
+    global _xlsx_export_mod
+    if _xlsx_export_mod is None:
+        from app.infrastructure.reporting import xlsx_export as _m
+        _xlsx_export_mod = _m
+    return _xlsx_export_mod
+def _get_pdf_export():
+    global _pdf_export_mod
+    if _pdf_export_mod is None:
+        from app.infrastructure.reporting import pdf_export as _m
+        _pdf_export_mod = _m
+    return _pdf_export_mod
+def _get_docx_export():
+    global _docx_export_mod
+    if _docx_export_mod is None:
+        from app.infrastructure.reporting import docx_export as _m
+        _docx_export_mod = _m
+    return _docx_export_mod
 
 
 # ── Validación numérica ───────────────────────────────────────────────────────
@@ -1142,6 +1174,15 @@ class InterfazOptimizacion(QMW):
         # ── Ventana ───────────────────────────────────────────────────────────
         self.setWindowTitle("Optimizador de Funciones")
         self.setMinimumSize(1120, 700)
+        # Garantiza minimizar/maximizar/cerrar en la barra de título nativa,
+        # tanto en modo normal como maximizado (por si algún tema/estilo de
+        # Windows los oculta por defecto en QMainWindow).
+        self.setWindowFlags(
+            self.windowFlags()
+            | _WF("WindowMinimizeButtonHint")
+            | _WF("WindowMaximizeButtonHint")
+            | _WF("WindowCloseButtonHint")
+        )
         _arrow_png = _ensure_combo_arrow_png()
         _qss_final = QSS.replace(
             "QComboBox::drop-down { border:none; width:20px; }",
@@ -1153,12 +1194,24 @@ class InterfazOptimizacion(QMW):
         self.setStyleSheet(_qss_final)
 
         central = QW(); self.setCentralWidget(central)
-        root = QHBox(central)
-        root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+        _central_layout = QVBox(central)
+        _central_layout.setContentsMargins(0,0,0,0)
+        # Splitter horizontal arrastrable entre Panel de control / Dashboard /
+        # Asistente de IA — antes era un QHBoxLayout con ancho fijo (no se
+        # podía expandir/contraer). Mismo patrón y estilo de "manija" que ya
+        # usa el splitter vertical del Dashboard (tabla/2D/3D) más abajo.
+        root = QSplit(Qt.Orientation.Horizontal if _QT=="PyQt6" else Qt.Horizontal)
+        root.setChildrenCollapsible(True)
+        root.setHandleWidth(6)
+        root.setStyleSheet(
+            "QSplitter::handle { background: rgba(60,100,200,160); }"
+            "QSplitter::handle:hover { background: rgba(80,140,255,220); }"
+        )
+        _central_layout.addWidget(root)
 
         # Panel izquierdo con scroll (los campos MD no se cortan)
         self.left = LeftPanel(bg)
-        self.left.setFixedWidth(375)
+        self.left.setMinimumWidth(280)
 
         self._left_inner = QW()
         self._left_inner.setStyleSheet("background: transparent;")
@@ -1187,20 +1240,15 @@ class InterfazOptimizacion(QMW):
         _left_outer_layout.setContentsMargins(0,0,0,0)
         _left_outer_layout.addWidget(self._left_scroll)
 
-        # Separador vertical
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.VLine if _QT=="PyQt6" else QFrame.VLine)
-        div.setFixedWidth(1)
-        div.setStyleSheet("background:rgba(60,100,200,120); border:none;")
-
         # Panel derecho
         self.right = BgPanel(bg, overlay_alpha=0)
         self._RL = QVBox(self.right)
         self._RL.setContentsMargins(16,14,16,14); self._RL.setSpacing(10)
 
         root.addWidget(self.left)
-        root.addWidget(div)
-        root.addWidget(self.right, 1)
+        root.addWidget(self.right)
+        root.setStretchFactor(0, 0)
+        root.setStretchFactor(1, 1)
 
         # ── Panel de IA (se muestra/oculta con btn_ai) ────────────────────────
         self.ai_panel = None
@@ -1210,9 +1258,15 @@ class InterfazOptimizacion(QMW):
                 self.ai_panel = AICls(central)
                 self.ai_panel.setVisible(False)
                 root.addWidget(self.ai_panel)
+                root.setStretchFactor(2, 0)
             except Exception as _ai_err:
                 print(f"[AI] No se pudo inicializar el panel: {_ai_err}")
                 self.ai_panel = None
+
+        # Tamaño inicial equivalente al ancho fijo que tenía antes (375px)
+        # — a partir de aquí el usuario puede arrastrar cada manija para
+        # expandir o contraer cualquiera de los 3 paneles.
+        root.setSizes([375, 900, 0])
 
         self._build_left()
         self._build_right()
@@ -1231,6 +1285,16 @@ class InterfazOptimizacion(QMW):
         L.addWidget(QLbl("Método:"))
         self.cmb = QCmb()
         _populate_grouped_combo(self.cmb)
+        # Sin esto, el ancho MÍNIMO del combo se calcula para mostrar la
+        # entrada más larga (p.ej. "Inventario: Punto de Reorden (ROP)")
+        # sin truncar — con "Panel de control" ahora redimensionable (ya no
+        # tiene ancho fijo), ese mínimo empujaba TODO el panel a ~650px+.
+        # Con AdjustToMinimumContentsLengthWithIcon + un largo razonable,
+        # el texto que no quepa se trunca con "…" en vez de forzar el ancho.
+        _sap = (QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+               if _QT == "PyQt6" else QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb.setSizeAdjustPolicy(_sap)
+        self.cmb.setMinimumContentsLength(12)
         L.addWidget(self.cmb); L.addSpacing(3)
 
         # 2 — Función
@@ -1593,12 +1657,17 @@ class InterfazOptimizacion(QMW):
         self.row_range.setVisible(not is_inv)
 
     def _on_inventory_built(self, model: dict, algo: str):
-        """El panel de Inventario generó y validó la función de costo —
-        avisa en el status bar; `ejecutar()` la toma cuando el usuario
-        pulse Calcular (mismo botón/flujo de siempre)."""
+        """
+        El panel de Inventario generó y validó la función de costo — se
+        calcula automáticamente de inmediato (sin esperar un segundo clic
+        en "Calcular") para que el dashboard, la tabla y las gráficas 2D/3D
+        se llenen apenas el usuario genera la función; antes quedaban
+        vacías hasta el clic manual en Calcular.
+        """
         self.lbl_st.setText(
             f"✓ Función de inventario generada ({model['titulo']}) — "
-            f"pulsa Calcular con «{algo}»")
+            f"calculando con «{algo}»…")
+        self.ejecutar()
 
     # ── RESET ─────────────────────────────────────────────────────────────────
     def _reset(self):
@@ -3220,13 +3289,17 @@ class InterfazOptimizacion(QMW):
         ("robotica",   "Robótica y Control Automático"),
     ]
 
-    def _ask_area_finalidad(self) -> List[str]:
+    def _ask_area_finalidad(self) -> Optional[List[str]]:
         """
         Pregunta al usuario la(s) finalidad(es) del estudio antes de exportar
         el PDF, con selección MÚLTIPLE (checklist). Devuelve la lista de
-        claves de área elegidas (["general"] si cancela o no marca nada).
-        "Estudio general" es mutuamente excluyente con las áreas específicas
-        (si se marca, desmarca/deshabilita las demás y viceversa).
+        claves de área elegidas (o ["general"] si acepta sin marcar ninguna).
+
+        Devuelve None si el usuario cancela (botón «Cancelar» o la X de la
+        ventana) — en ese caso el llamador debe abortar la exportación por
+        completo, sin abrir el diálogo de guardar ni generar ningún archivo
+        (antes se interpretaba como "general" y la exportación continuaba
+        igual, que es exactamente lo que NO se quiere de un cancelar).
         """
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Finalidad del estudio")
@@ -3292,7 +3365,7 @@ class InterfazOptimizacion(QMW):
         accepted = (QtWidgets.QDialog.DialogCode.Accepted if _QT == "PyQt6"
                     else QtWidgets.QDialog.Accepted)
         if result != accepted:
-            return ["general"]
+            return None   # Cancelar o X: abortar exportación, sin valor por defecto
 
         chosen = [it.data(Qt.ItemDataRole.UserRole if _QT == "PyQt6" else Qt.UserRole)
                   for it in items if it.checkState() == _checked]
@@ -3312,7 +3385,7 @@ class InterfazOptimizacion(QMW):
 
         try:
             session = self._session_snapshot()
-            csv_export.write_csv_db(folder, session, self._history_log)
+            _get_csv_export().write_csv_db(folder, session, self._history_log)
             n_iter = sum(len(s.get("hist") or []) for s in session)
             self._show_export_success(
                 "CSV", folder,
@@ -3329,7 +3402,7 @@ class InterfazOptimizacion(QMW):
         if self.table.rowCount() == 0:
             return self._nodata()
         try:
-            import openpyxl  # noqa: F401 — solo para el chequeo de dependencia
+            xlsx_export = _get_xlsx_export()
         except ImportError:
             QMsgBox.warning(self, "Dependencia", "pip install openpyxl")
             return
@@ -3355,11 +3428,13 @@ class InterfazOptimizacion(QMW):
         if self.table.rowCount() == 0:
             return self._nodata()
         try:
-            import reportlab  # noqa: F401 — solo para el chequeo de dependencia
+            pdf_export = _get_pdf_export()
         except ImportError:
             QMsgBox.warning(self, "Dependencia", "pip install reportlab"); return
 
         area_keys = self._ask_area_finalidad()
+        if area_keys is None:
+            return   # Cancelar / X: no exportar nada, no pedir ruta de guardado
 
         p, _ = QFD.getSaveFileName(self, "Guardar PDF", "reporte.pdf", "PDF (*.pdf)")
         if not p: return
@@ -3381,11 +3456,13 @@ class InterfazOptimizacion(QMW):
         if self.table.rowCount() == 0:
             return self._nodata()
         try:
-            import docx  # noqa: F401 — solo para el chequeo de dependencia
+            docx_export = _get_docx_export()
         except ImportError:
             QMsgBox.warning(self, "Dependencia", "pip install python-docx"); return
 
         area_keys = self._ask_area_finalidad()
+        if area_keys is None:
+            return   # Cancelar / X: no exportar nada, no pedir ruta de guardado
 
         p, _ = QFD.getSaveFileName(self, "Guardar Word", "reporte.docx", "Word (*.docx)")
         if not p: return

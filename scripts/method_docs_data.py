@@ -438,3 +438,74 @@ COMPAT_MATRIX = [
          incompatibles="Funciones ya multivariable (2+ variables) — bloqueado con mensaje: «no se pudo aplicar este tipo de estudio a la expresión dada»",
          nota="El sistema NO acepta un F(x) multivariable directo: siempre parte de f(x) de 1 variable y genera f2 internamente."),
 ]
+
+# ─── Implementación del Agente de IA (asistente conversacional) ────────────
+# Documenta CÓMO está implementada y funcionando la IA en la app real —
+# app/infrastructure/ai_assistant.py — no es contenido genérico/aspiracional.
+AI_IMPLEMENTATION = [
+    ("Proveedor y modelo conversacional",
+     "El chat usa Groq como proveedor principal (API compatible con OpenAI, "
+     "gratuita, ~30 solicitudes/minuto) con fallback automático a OpenRouter "
+     "si Groq falla por red, límite de tasa o error del servicio. El "
+     "proveedor se detecta por el prefijo de la API key ('gsk_' → Groq, "
+     "'sk-or-' → OpenRouter); el usuario puede configurar una key principal "
+     "y una de respaldo. Los reintentos ante error son silenciosos (el "
+     "usuario no ve mensajes técnicos) con espera corta creciente (600ms, "
+     "1.2s, 1.8s) antes de recurrir al respaldo."),
+    ("Prompt de sistema y alcance",
+     "Un prompt de sistema fijo describe los 32 métodos de optimización "
+     "disponibles (fórmulas, cuándo usarlos, incompatibilidades) y los 4 "
+     "modelos del módulo de Inventario (EOQ Clásico, EOQ con Faltantes, EOQ "
+     "con Descuentos, Punto de Reorden), con reglas explícitas de qué "
+     "algoritmo recomendar para cada uno y por qué. El asistente restringe "
+     "sus respuestas al dominio de optimización matemática y esta "
+     "aplicación; ante preguntas fuera de dominio devuelve un mensaje fijo "
+     "de redirección."),
+    ("Contexto dinámico por cálculo",
+     "Tras cada cálculo, la ventana principal llama a "
+     "AIAssistantPanel.update_context(...) con el método usado, la función, "
+     "variables, rango, número de iteraciones y el resultado numérico "
+     "obtenido — y, si el cálculo fue un modelo de Inventario, también sus "
+     "valores analíticos (Q*, costo total, ROP, etc.). Ese contexto se "
+     "concatena al prompt de sistema en cada mensaje, así que la IA "
+     "responde con base en lo que realmente se calculó en la sesión, no en "
+     "una descripción genérica."),
+    ("Detección de intención de Inventario",
+     "Si la respuesta de la IA nombra explícitamente uno de los 4 modelos "
+     "de Inventario por su etiqueta exacta del combo (coincidencia de texto "
+     "determinista, no una heurística libre), se emite una señal Qt "
+     "(inventory_model_suggested) que la ventana principal usa para activar "
+     "ese método automáticamente — el usuario no necesita seleccionarlo a mano."),
+    ("Modos de respuesta: Escrito / Voz / Ambas",
+     "El usuario elige, la primera vez que envía un mensaje, si quiere "
+     "respuesta por escrito, por voz, o ambas — la elección queda fija "
+     "para el resto de la sesión (se puede cambiar en cualquier momento con "
+     "los botones junto al cuadro de texto). En modo Voz o Ambas aparece "
+     "automáticamente un reproductor compacto (Play/Pausa/Detener); en modo "
+     "Escrito permanece oculto por completo."),
+    ("Entrada por voz (Speech-to-Text)",
+     "La grabación usa sounddevice (16 kHz mono) en un hilo aparte. La "
+     "transcripción se hace con Groq Whisper (modelo whisper-large-v3-turbo); "
+     "si ese endpoint falla (bloqueo de red, error del proveedor), cae "
+     "automáticamente a una transcripción local sin red mediante el paquete "
+     "SpeechRecognition (API gratuita de Google Web Speech), usando el mismo "
+     "WAV ya grabado, sin pedir que el usuario grabe de nuevo. Al terminar "
+     "de transcribir, la solicitud se envía y procesa automáticamente."),
+    ("Salida por voz (Text-to-Speech)",
+     "La síntesis usa pyttsx3 sobre el motor SAPI5 de Windows (offline, sin "
+     "costo ni dependencia de red), con una voz en español instalada en el "
+     "sistema. Antes de sintetizar, el texto de la respuesta se traduce de "
+     "notación matemática a palabras naturales (exponentes: 'x**2' → 'x al "
+     "cuadrado'; subíndices: 'x_k' → 'x sub k'; letras griegas: 'α' → "
+     "'alfa'; operadores: '≤' → 'menor o igual que', '√' → 'raíz cuadrada "
+     "de', etc.) para que se escuche natural en vez de leer símbolos "
+     "literalmente. El reproductor usa Pause()/Resume() nativos del objeto "
+     "COM de SAPI5 — la pausa/reanudación es real (continúa exactamente "
+     "donde se cortó), no una resíntesis desde el inicio."),
+    ("Privacidad y almacenamiento",
+     "Las API keys se guardan localmente en la configuración de la app "
+     "(no en un servidor propio). Las conversaciones no se registran ni "
+     "envían a ningún servidor del proyecto — solo se transmiten al "
+     "proveedor de IA (Groq u OpenRouter) que el propio usuario configuró, "
+     "bajo los términos de esos servicios."),
+]

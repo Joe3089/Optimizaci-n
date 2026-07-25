@@ -29,6 +29,31 @@ from app.domain.inventory import (
     INVENTORY_MODEL_LABELS, INVENTORY_LABEL_TO_KEY, INVENTORY_METHOD_LABELS,
 )
 
+# Mismo estilo de botón (gradiente azul→turquesa) que Calcular/Limpiar/
+# Exportar/Salir en main_window.py — se duplica aquí en vez de importarse
+# porque allá está definido como variable local dentro de _build_ui().
+_BTN_STYLE = (
+    "QPushButton {"
+    "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+    "    stop:0 #1a6ee8, stop:1 #0fb8c9);"
+    "  color: #ffffff;"
+    "  border: none;"
+    "  border-radius: 10px;"
+    "  font-weight: bold;"
+    "  font-size: 13px;"
+    "  min-height: 38px;"
+    "  letter-spacing: 0.5px;"
+    "}"
+    "QPushButton:hover {"
+    "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+    "    stop:0 #2e88f5, stop:1 #1fd0e0);"
+    "}"
+    "QPushButton:pressed {"
+    "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+    "    stop:0 #1050b0, stop:1 #0a90a0);"
+    "}"
+)
+
 # Catálogo por clave, para mostrar métodos recomendados sin reconstruir el
 # modelo (solo necesitamos "metodos_recomendados", ya fijo por modelo).
 _CATALOG_BY_MODEL = {
@@ -54,10 +79,20 @@ _RECOMMENDED_METHODS = {
 }
 
 
-def _dspin(minv=0.0001, maxv=1e9, val=1.0, decimals=4, step=1.0):
+def _dspin(minv=0.0001, maxv=1_000_000.0, val=1.0, decimals=4, step=1.0):
+    """
+    QDoubleSpinBox con rango/ancho acotados. `maxv` bajó de 1e9 a 1e6 por
+    defecto: Qt reserva el ancho del spinbox según el valor máximo posible
+    ("1000000000.0000" con maxv=1e9 exige mucho más espacio horizontal que
+    el panel de control tiene disponible — 375px con márgenes — y el layout
+    no podía comprimirlo, desbordando todo el panel de Inventario fuera de
+    sus márgenes). `setMaximumWidth` es la garantía final, sin importar el
+    rango que se use.
+    """
     s = QtWidgets.QDoubleSpinBox()
     s.setRange(minv, maxv); s.setDecimals(decimals)
     s.setValue(val); s.setSingleStep(step)
+    s.setMaximumWidth(150)
     return s
 
 
@@ -82,6 +117,14 @@ class InventoryPanel(QtWidgets.QFrame):
 
         self.lbl_title = QtWidgets.QLabel("Parámetros de Inventario")
         self.lbl_title.setStyleSheet("font-weight:bold;color:#7aaaea;")
+        # CRÍTICO: sin word-wrap, un QLabel calcula su ancho MÍNIMO para
+        # mostrar todo el texto en una sola línea — con el título largo que
+        # arma set_model() (p.ej. "... — Revisión Periódica / Punto de
+        # Reorden (ROP) Probabilístico") esto forzaba TODO el panel (y por
+        # cascada, el panel de control completo) a expandirse muy por
+        # encima de sus 375px habituales. Con wrap, el label se ajusta al
+        # ancho real del panel en vez de imponerle el suyo.
+        self.lbl_title.setWordWrap(True)
         lay.addWidget(self.lbl_title)
 
         # ── Campos comunes a varios modelos ──────────────────────────────
@@ -92,9 +135,11 @@ class InventoryPanel(QtWidgets.QFrame):
 
         # ── Descuentos por cantidad: tasa + tabla de tramos ─────────────
         self.row_rate = self._field_row(
-            lay, "Tasa de mantenimiento (fracción, ej. 0.2):", "rate", 0.2, decimals=4)
+            lay, "Tasa de mantenimiento (fracción, ej. 0.2):", "rate", 0.2, decimals=4,
+            minv=0.0001, maxv=0.9999)
 
         self.lbl_breaks = QtWidgets.QLabel("Tramos de precio (cantidad mínima, precio unitario):")
+        self.lbl_breaks.setWordWrap(True)
         lay.addWidget(self.lbl_breaks)
         self.tbl_breaks = QtWidgets.QTableWidget(3, 2)
         self.tbl_breaks.setHorizontalHeaderLabels(["Cant. mínima", "Precio unit."])
@@ -107,6 +152,8 @@ class InventoryPanel(QtWidgets.QFrame):
         row_break_btns = QtWidgets.QHBoxLayout()
         self.btn_add_break = QtWidgets.QPushButton("+ tramo")
         self.btn_del_break = QtWidgets.QPushButton("− tramo")
+        self.btn_add_break.setStyleSheet(_BTN_STYLE)
+        self.btn_del_break.setStyleSheet(_BTN_STYLE)
         self.btn_add_break.clicked.connect(self._add_break_row)
         self.btn_del_break.clicked.connect(self._del_break_row)
         row_break_btns.addWidget(self.btn_add_break); row_break_btns.addWidget(self.btn_del_break)
@@ -118,20 +165,22 @@ class InventoryPanel(QtWidgets.QFrame):
         self.row_sigma_d  = self._field_row(lay, "Desv. estándar diaria (σ_d):", "sigma_d", 5.0)
         self.row_lead     = self._field_row(lay, "Lead time (días):", "lead_time", 7.0)
         self.row_nivel    = self._field_row(
-            lay, "Nivel de servicio (0-1):", "nivel_servicio", 0.95, decimals=4, step=0.01)
+            lay, "Nivel de servicio (0-1):", "nivel_servicio", 0.95, decimals=4, step=0.01,
+            minv=0.0001, maxv=0.9999)
 
         # ── Algoritmo compatible (filtrado por modelo) ──────────────────
+        # El combo ya solo lista los métodos compatibles con el modelo
+        # elegido — eso por sí solo impide seleccionar uno incompatible.
+        # (Se eliminó el texto informativo "No compatibles con este
+        # modelo: …" que iba debajo: no tenía ninguna función interactiva,
+        # solo repetía en prosa lo que el propio combo ya garantiza.)
         lay.addWidget(QtWidgets.QLabel("Algoritmo a usar:"))
         self.cmb_algo = QtWidgets.QComboBox()
         lay.addWidget(self.cmb_algo)
 
-        self.lbl_incompatibles = QtWidgets.QLabel("")
-        self.lbl_incompatibles.setStyleSheet("color:#7a90b0; font-size:10px;")
-        self.lbl_incompatibles.setWordWrap(True)
-        lay.addWidget(self.lbl_incompatibles)
-
         # ── Generar / error / resultados analíticos ─────────────────────
-        self.btn_generar = QtWidgets.QPushButton("Generar función de costo →")
+        self.btn_generar = QtWidgets.QPushButton("Generar función →")
+        self.btn_generar.setStyleSheet(_BTN_STYLE)
         self.btn_generar.clicked.connect(self._on_generar)
         lay.addWidget(self.btn_generar)
 
@@ -153,13 +202,24 @@ class InventoryPanel(QtWidgets.QFrame):
         self.setVisible(False)
 
     # ── helpers de construcción ──────────────────────────────────────────
-    def _field_row(self, lay, label_text, attr_prefix, default, decimals=4, step=1.0):
+    def _field_row(self, lay, label_text, attr_prefix, default, decimals=4, step=1.0,
+                  minv=0.0001, maxv=1_000_000.0):
+        """
+        Etiqueta arriba + campo abajo a todo el ancho — mismo patrón que el
+        resto del "Panel de control" (p.ej. "Función f(x):" / edt_fx), en
+        vez de etiqueta y campo lado a lado. Con etiquetas largas como
+        "Demanda diaria promedio (d̄):" el layout lado a lado desbordaba el
+        ancho del panel y quedaba desalineado con el resto de la app.
+        """
         row = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
-        h.addWidget(QtWidgets.QLabel(label_text))
-        spin = _dspin(val=default, decimals=decimals, step=step)
+        v = QtWidgets.QVBoxLayout(row); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
+        lbl = QtWidgets.QLabel(label_text)
+        lbl.setWordWrap(True)   # ver nota en lbl_title: evita que una etiqueta
+                                # larga fuerce el ancho de todo el panel
+        v.addWidget(lbl)
+        spin = _dspin(val=default, decimals=decimals, step=step, minv=minv, maxv=maxv)
         setattr(self, f"spin_{attr_prefix}", spin)
-        h.addWidget(spin)
+        v.addWidget(spin)
         lay.addWidget(row)
         return row
 
@@ -206,12 +266,6 @@ class InventoryPanel(QtWidgets.QFrame):
         cat = _CATALOG_BY_MODEL.get(model_key, {})
         titulo = cat.get("nombre", "Inventario")
         self.lbl_title.setText(f"Parámetros de Inventario — {titulo}")
-        # Explica por qué el combo de arriba NO ofrece otros métodos —
-        # impide la selección de métodos incompatibles en vez de solo
-        # bloquearla después de elegirlos.
-        incompat = cat.get("incompatibles", "")
-        self.lbl_incompatibles.setText(
-            f"No compatibles con este modelo: {incompat}" if incompat else "")
 
     def model_key(self) -> Optional[str]:
         return self._model_key

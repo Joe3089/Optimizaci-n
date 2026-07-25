@@ -194,19 +194,15 @@ def write_pdf(path: str, session: list, *,
 
     def _banner_w(title, subtitle="", logo_buf=None):
         """
-        Banner con fondo azul oscuro para la página de resumen. Si se pasa
-        `logo_buf` (BytesIO de imagen), se integra en una columna propia
-        junto al título/subtítulo dentro de la misma tabla del encabezado,
-        en vez de quedar como una imagen suelta y descentrada encima del
-        banner.
+        Banner de portada. Si se pasa `logo_buf` (BytesIO de imagen), se
+        integra en una columna propia junto al título/subtítulo dentro de
+        la misma tabla del encabezado, en vez de quedar como una imagen
+        suelta y descentrada encima del banner.
 
-        Fondo: usa `cDark` (#0A1428, casi negro-azulado) en vez de
-        `cDkBlue` (#1A3A6A) — el logo (Menu/fondo_optimizacion.png) tiene
-        un fondo propio casi negro (~RGB 12,19,35), muy cercano a `cDark`
-        pero notablemente más oscuro que `cDkBlue`; con `cDkBlue` se veía
-        un recuadro oscuro alrededor del ícono que rompía la integración
-        visual. Con `cDark` el ícono se funde con el banner sin recuadro
-        visible, y el texto blanco del título gana aún más contraste.
+        Fondo: `cDkBlue` (#1A3A6A), el mismo azul que el resto de banners
+        del informe (métodos, conclusión). El logo va en su propia
+        "tarjeta" clara (fondo `cLightBg` + borde `cAccent`) para que se
+        distinga del banner sin depender de qué color tenga éste.
         """
         title_cell = [Paragraph(title, sWTitle)]
         if subtitle:
@@ -228,7 +224,7 @@ def write_pdf(path: str, session: list, *,
 
         t = Table(rows, colWidths=col_w)
         style = [
-            ("BACKGROUND",    (0,0), (-1,-1), cDark),
+            ("BACKGROUND",    (0,0), (-1,-1), cDkBlue),
             ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
             ("TOPPADDING",    (0,0), (-1,-1), 10),
             ("BOTTOMPADDING", (0,0), (-1,-1), 10),
@@ -237,6 +233,8 @@ def write_pdf(path: str, session: list, *,
         ]
         if logo_img is not None:
             style.append(("ALIGN", (0,0), (0,0), "CENTER"))
+            style.append(("BACKGROUND", (0,0), (0,0), cLightBg))
+            style.append(("BOX", (0,0), (0,0), 1.0, cAccent))
         t.setStyle(TableStyle(style))
         return t
 
@@ -497,9 +495,11 @@ def write_pdf(path: str, session: list, *,
                     remaining_tbl.setStyle(_make_tbl_style(bg0, bg1))
                     elems.append(remaining_tbl)
             else:
-                elems.append(_HR(1.0, cBlue))
-                elems.append(Paragraph("Tabla de Iteraciones", sSecHdr))
-                elems.append(Paragraph("Sin datos de iteración.", sBody))
+                elems.append(KeepTogether([
+                    _HR(1.0, cBlue),
+                    Paragraph("Tabla de Iteraciones", sSecHdr),
+                    Paragraph("Sin datos de iteración.", sBody),
+                ]))
 
             # ── Cálculos paso a paso ───────────────────────────────────────
             elems.append(Spacer(1, 0.4*cm))
@@ -523,8 +523,10 @@ def write_pdf(path: str, session: list, *,
                     elems.append(KeepTogether([_step_box(step_title, body_lines)]))
                 elems.append(Spacer(1, 0.12*cm))
             else:
-                elems.append(_HR(1.0, cBlue))
-                elems.append(Paragraph("Cálculos Paso a Paso", sSecHdr))
+                elems.append(KeepTogether([
+                    _HR(1.0, cBlue),
+                    Paragraph("Cálculos Paso a Paso", sSecHdr),
+                ]))
 
             # ── Gráficas (siempre en página nueva) ────────────────────────
             elems.append(PageBreak())

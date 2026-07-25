@@ -20,6 +20,13 @@ import traceback
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Nombres de métodos como "MO — ε-Constraint" llevan caracteres fuera de
+# cp1252 (consola Windows por defecto); sin esto, imprimirlos revienta el
+# script con UnicodeEncodeError a mitad de la corrida.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from PyQt5.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 import app.ui.main_window as _mw  # noqa: E402

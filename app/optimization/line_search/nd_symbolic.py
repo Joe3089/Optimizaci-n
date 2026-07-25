@@ -184,8 +184,8 @@ def wolfe_line_search(
     final_alfa = alfa
 
     print("--- Iniciando Bisección ---")
-    print(f"Condición a cumplir: |∇f(α)ᵀd| <= {RHS:.6f}  (calculado de μ * |{g_k_dot_d:.2f}|)")
-    print("k | ALFA  | |∇f(α)ᵀd| (LHS) | ∇f(α)ᵀd (Sign) |  u    |  v    | next_α")
+    print(f"Condicion a cumplir: |grad(f)(a)^T d| <= {RHS:.6f}  (calculado de mu * |{g_k_dot_d:.2f}|)")
+    print("k | ALFA  | |grad(f)(a)^T d| (LHS) | grad(f)(a)^T d (Sign) |  u    |  v    | next_a")
     print("-" * 70)
 
     for k in range(max_iter):
