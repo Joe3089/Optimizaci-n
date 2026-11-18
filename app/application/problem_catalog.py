@@ -241,7 +241,9 @@ def _scheduling(v):
         raise ValueError("Iterated Greedy (NEH) es solo para flow shop; en job shop usa el "
                          "Algoritmo Genético, el Recocido Simulado o «Comparar todos».")
     return mex.solve_scheduling(v["tipo"], v["datos"], alg, integer(v["iter"], "Iteraciones"),
-                                integer(v["pob"], "Población"), integer(v["semilla"], "Semilla"))
+                                integer(v["pob"], "Población"), integer(v["semilla"], "Semilla"),
+                                v.get("objetivo") or mex.OBJECTIVES[0], v.get("entregas", ""),
+                                v.get("pesos", ""), v.get("preparacion", ""))
 
 
 def _maxcut(v):
@@ -444,14 +446,18 @@ SPECS: List[ProblemSpec] = [
                                                    integer(v["pob"], "Población"),
                                                    integer(v["semilla"], "Semilla"))),
     ProblemSpec("Metaheurística: Ruteo de Vehículos (CVRP)", SECTION_OPT, "Metaheurísticas avanzadas",
-                "Reparto desde un depósito con vehículos de capacidad limitada. Clientes: «x, y, "
-                "demanda» por línea. Vehículos = 0 significa flota sin límite.",
-                [Field("deposito", "Depósito (x, y):", "line", "50, 50"),
+                "Reparto desde un depósito. Clientes: «x, y, demanda» o, con ventanas horarias, "
+                "«x, y, demanda, inicio, fin, servicio». Depósito «x, y» o «x, y, apertura, "
+                "cierre». Flota homogénea (capacidad y vehículos; 0 = sin límite) o tipos de "
+                "vehículo «capacidad, costo fijo, costo por distancia, cantidad».",
+                [Field("deposito", "Depósito (x, y[, apertura, cierre]):", "line", "50, 50"),
                  Field("clientes", "Clientes (x, y, demanda por línea):", "text",
                        "\n".join(f"{a:g}, {b:g}, {d}" for (a, b), d in zip(
                            amh.random_cities(12, 7), (4, 7, 3, 6, 5, 8, 2, 6, 4, 7, 3, 5)))),
                  Field("cap", "Capacidad por vehículo:", "line", "20"),
                  Field("veh", "Número máximo de vehículos (0 = sin límite):", "line", "0"),
+                 Field("tipos", "O tipos de vehículo (capacidad, costo fijo, costo/distancia, "
+                                "cantidad; opcional):", "text", ""),
                  Field("algoritmo", "Algoritmo:", "choice", "Comparar todos", mex.VRP_ALGORITHMS),
                  Field("iter", "Iteraciones:", "line", "60"),
                  Field("pob", "Población / movimientos:", "line", "20"), _F_SEED],
@@ -461,16 +467,23 @@ SPECS: List[ProblemSpec] = [
                                         integer(v.get("veh") or "0", "Vehículos"),
                                         v["algoritmo"], integer(v["iter"], "Iteraciones"),
                                         integer(v["pob"], "Población"),
-                                        integer(v["semilla"], "Semilla"))),
+                                        integer(v["semilla"], "Semilla"),
+                                        v.get("tipos", ""))),
     ProblemSpec("Metaheurística: Programación de Tareas", SECTION_OPT, "Metaheurísticas avanzadas",
-                "Minimiza el makespan. Flow shop: una fila por trabajo con su tiempo en cada "
-                "máquina. Job shop: una fila por trabajo con pares «máquina tiempo» en orden "
-                "(máquinas desde 1). Ejemplo: FT06 de Fisher-Thompson (óptimo 55).",
+                "Minimiza makespan, tardanza total, tardanza ponderada o retraso máximo. Flow "
+                "shop: una fila por trabajo con su tiempo en cada máquina. Job shop: pares "
+                "«máquina tiempo» en orden (máquinas desde 1). Opcional: fechas de entrega, pesos "
+                "y matriz de preparación dependiente de la secuencia. Ejemplo: FT06 (óptimo 55).",
                 [Field("tipo", "Tipo de taller:", "choice", "Job shop", ("Job shop", "Flow shop")),
+                 Field("objetivo", "Objetivo:", "choice", mex.OBJECTIVES[0], mex.OBJECTIVES),
                  Field("datos", "Trabajos (uno por línea):", "text", mex.FT06),
                  Field("algoritmo", "Algoritmo:", "choice", "Comparar todos", _SCHED_ALGS),
                  Field("iter", "Iteraciones:", "line", "200"),
-                 Field("pob", "Población / movimientos:", "line", "30"), _F_SEED],
+                 Field("pob", "Población / movimientos:", "line", "30"),
+                 Field("entregas", "Fechas de entrega (una por trabajo, opcional):", "line", ""),
+                 Field("pesos", "Pesos de los trabajos (opcional):", "line", ""),
+                 Field("preparacion", "Preparación i→j (matriz n×n, opcional):", "text", ""),
+                 _F_SEED],
                 _scheduling),
     ProblemSpec("Metaheurística: Viajante (TSP grande)", SECTION_OPT, "Metaheurísticas avanzadas",
                 "Rutas de hasta 300 ciudades con Colonia de Hormigas, Recocido Simulado (2-opt) "

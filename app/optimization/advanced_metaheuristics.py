@@ -20,15 +20,15 @@ import numpy as np
 
 from app.application import func_compat as fc
 
-ALGORITHMS = ("Evolución Diferencial", "PSO: Enjambre de Partículas", "Algoritmo Genético",
-              "Recocido Simulado", "Búsqueda Tabú", "Comparar todos")
+ALGORITHMS = ("Evolución Diferencial", "CMA-ES", "PSO: Enjambre de Partículas",
+              "Algoritmo Genético", "Recocido Simulado", "Búsqueda Tabú", "Comparar todos")
 TSP_ALGORITHMS = ("Colonia de Hormigas (ACO)", "Recocido Simulado (2-opt)",
                   "Algoritmo Genético (cruce OX)", "Comparar todos")
 EQ_TOL = 1e-4                     # tolerancia de las restricciones de igualdad
 _FORBIDDEN = re.compile(r"__|\bimport\b|\blambda\b|\bexec\b|\beval\b|\bopen\b|[\"';`$\\{}\[\]@]")
 _COLORS = {"Evolución Diferencial": "#ffd700", "PSO: Enjambre de Partículas": "#4a9eff",
            "Algoritmo Genético": "#3cff8a", "Recocido Simulado": "#ff6b35",
-           "Búsqueda Tabú": "#c77dff"}
+           "Búsqueda Tabú": "#c77dff", "CMA-ES": "#ff5c8a"}
 
 
 # ── Expresiones seguras ──────────────────────────────────────────────────────
@@ -325,6 +325,118 @@ def _energy(o, v):
 
 
 def annealing(p, iters, pop, rng):
+    """Recocido Simulado. Con variables reales y sin restricciones usa basin
+    hopping (Metropolis sobre mínimos locales, Wales y Doye 1997); en otro caso,
+    intercambio de réplicas con paso adaptativo."""
+    if not p.g and all(v.kind == "real" for v in p.vars):
+        try:
+            import scipy.optimize  # noqa: F401
+            return _annealing_bh(p, iters, pop, rng)
+        except ImportError:
+            pass
+    return _annealing_pt(p, iters, pop, rng)
+
+
+def _local_min(p, x, rec):
+    from scipy.optimize import minimize
+    lo, hi = p.lo, p.hi
+
+    def fun(z):
+        val = float(p.sense * p.f(np.clip(z, lo, hi)[None, :])[0])
+        return val if math.isfinite(val) else 1e300
+    r = minimize(fun, x, method="L-BFGS-B", bounds=list(zip(lo, hi)),
+                 options={"maxiter": 300})
+    rec.evals += int(r.nfev)
+    y = np.clip(r.x, lo, hi)
+    _eval(p, y[None, :], rec)
+    return y, float(r.fun)
+
+
+def _annealing_bh(p, iters, pop, rng):
+    rec = _Recorder(p, "Recocido Simulado")
+    d = len(p.vars)
+    span = p.hi - p.lo
+    S = _init_pop(p, max(10, pop), rng)
+    so, _ = _eval(p, S, rec)
+    x, e = _local_min(p, S[int(np.argmin(so))], rec)
+    fin = so[np.isfinite(so)]
+    T0 = max(1e-3, 0.02 * float(np.std(fin))) if fin.size > 1 else 1.0
+    step = 0.1 * span
+    acc, tried = 0, 0
+    rec.log(0)
+    for it in range(1, iters + 1):
+        T = T0 * (0.01 ** (it / iters))
+        k = 1 if rng.random() < 0.9 else int(rng.integers(1, max(2, d // 4) + 1))
+        j = rng.choice(d, k, replace=False)
+        y0 = x.copy()
+        y0[j] += rng.choice((-1.0, 1.0), k) * (0.5 + rng.random(k)) * step[j]
+        y, ey = _local_min(p, np.clip(y0, p.lo, p.hi), rec)
+        tried += 1
+        if ey <= e or rng.random() < math.exp(-(ey - e) / max(T, 1e-300)):
+            x, e = y, ey
+            acc += 1
+        rec.log(it)
+    return rec
+
+
+def cma_es(p, iters, pop, rng):
+    """CMA-ES (Hansen) en el espacio normalizado [0, 1]^n con reinicios IPOP
+    (población doble en cada reinicio) y ranking por reglas de Deb."""
+    rec = _Recorder(p, "CMA-ES")
+    d = len(p.vars)
+    lo, span = p.lo, p.hi - p.lo
+    lam0 = max(pop, 4 + int(3 * np.log(d)))
+    it, restarts = 0, 0
+    _eval(p, p.repair((lo + 0.5 * span)[None, :]), rec)
+    rec.log(0)
+    while it < iters:
+        lam = lam0 * 2 ** restarts
+        mu = lam // 2
+        w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1)); w /= w.sum()
+        mueff = 1 / (w ** 2).sum()
+        cc = (4 + mueff / d) / (d + 4 + 2 * mueff / d)
+        cs = (mueff + 2) / (d + mueff + 5)
+        c1 = 2 / ((d + 1.3) ** 2 + mueff)
+        cmu = min(1 - c1, 2 * (mueff - 2 + 1 / mueff) / ((d + 2) ** 2 + mueff))
+        damps = 1 + 2 * max(0, math.sqrt((mueff - 1) / (d + 1)) - 1) + cs
+        chiN = math.sqrt(d) * (1 - 1 / (4 * d) + 1 / (21 * d * d))
+        m = rng.random(d) if restarts else np.full(d, 0.5)
+        sigma, pc, ps = 0.3, np.zeros(d), np.zeros(d)
+        B, Dg, C = np.eye(d), np.ones(d), np.eye(d)
+        gen, stall, last = 0, 0, np.inf
+        while it < iters:
+            it += 1; gen += 1
+            Z = rng.standard_normal((lam, d))
+            Y = Z @ (B * Dg).T
+            Xn = np.clip(m + sigma * Y, 0, 1)
+            X = p.repair(lo + Xn * span)
+            o, v = _eval(p, X, rec)
+            key = np.where(v > 0, v, o)
+            idx = np.lexsort((key, v > 0))[:mu]
+            m_old = m
+            ysel = (Xn[idx] - m_old) / sigma
+            m = np.clip(m_old + sigma * (w @ ysel), 0, 1)
+            inv = B @ np.diag(1 / Dg) @ B.T
+            ps = (1 - cs) * ps + math.sqrt(cs * (2 - cs) * mueff) * inv @ (m - m_old) / sigma
+            hs = np.linalg.norm(ps) / math.sqrt(1 - (1 - cs) ** (2 * gen)) / chiN < 1.4 + 2 / (d + 1)
+            pc = (1 - cc) * pc + hs * math.sqrt(cc * (2 - cc) * mueff) * (m - m_old) / sigma
+            C = ((1 - c1 - cmu) * C + c1 * (np.outer(pc, pc) + (1 - hs) * cc * (2 - cc) * C)
+                 + cmu * (ysel.T * w) @ ysel)
+            sigma = min(sigma * math.exp((cs / damps) * (np.linalg.norm(ps) / chiN - 1)), 1.0)
+            C = np.triu(C) + np.triu(C, 1).T
+            ev, B = np.linalg.eigh(C)
+            Dg = np.sqrt(np.maximum(ev, 1e-20))
+            rec.log(it)
+            cur = float(key[idx[0]])
+            stall = stall + 1 if cur >= last - 1e-12 * max(1.0, abs(last)) else 0
+            last = min(last, cur)
+            if sigma < 1e-11 or Dg.max() / Dg.min() > 1e7 or stall > 10 + 30 * d / lam:
+                restarts += 1                         # reinicio IPOP
+                break
+    return rec
+
+
+def _annealing_pt(p, iters, pop, rng):
     """Recocido Simulado con intercambio de réplicas (parallel tempering): K
     cadenas a temperaturas geométricas que se enfrían juntas; cada movimiento
     cambia una variable con paso propio adaptado (~44 % de aceptación) y las
@@ -446,7 +558,7 @@ def polish(p: Problem, x0: np.ndarray, o0: float, v0: float):
     return x0, o0, v0
 
 
-_RUNNERS = {"Evolución Diferencial": differential_evolution,
+_RUNNERS = {"Evolución Diferencial": differential_evolution, "CMA-ES": cma_es,
             "PSO: Enjambre de Partículas": particle_swarm,
             "Algoritmo Genético": genetic, "Recocido Simulado": annealing,
             "Búsqueda Tabú": tabu_search}

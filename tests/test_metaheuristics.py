@@ -116,11 +116,21 @@ def test_tabu_reaches_rastrigin_global():
     assert r["f"] < 1e-6, r["resumen"]
 
 
-def test_annealing_much_better_on_rastrigin():
-    # antes del rediseño el Recocido Simulado quedaba en ~32
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_annealing_reaches_rastrigin_global(seed):
+    # basin hopping: antes del rediseño el Recocido Simulado quedaba en ~32
     r = am.solve_general("Minimizar", RASTRIGIN10, "todas: -5.12, 5.12", "",
-                         "Recocido Simulado", 600, 60, 2)
-    assert r["f"] < 10, r["resumen"]
+                         "Recocido Simulado", 600, 30, seed)
+    assert r["f"] < 1e-6, r["resumen"]
+
+
+ROSEN10 = "+".join(f"(100*(x{i + 1}-x{i}**2)**2 + (1-x{i})**2)" for i in range(1, 10))
+
+
+@pytest.mark.parametrize("fn,bounds", [(RASTRIGIN10, "-5.12, 5.12"), (ROSEN10, "-5, 10")])
+def test_cma_es_hard_functions(fn, bounds):
+    r = am.solve_general("Minimizar", fn, f"todas: {bounds}", "", "CMA-ES", 600, 30, 1)
+    assert r["f"] < 1e-6, r["resumen"]
 
 
 @pytest.mark.parametrize("alg", CONT)
@@ -212,3 +222,87 @@ def test_new_catalog_entries():
                   "Metaheurística: Programación de Tareas"):
         res = solve(label, defaults(label))
         assert res["hist"] and res["resumen"] and callable(res["plot3d"])
+
+
+# ── VRP con ventanas horarias y flota heterogénea ────────────────────────────
+def _tw_instance():
+    r2 = np.random.default_rng(11)
+    out = []
+    for _ in range(7):
+        x, y = np.round(r2.random(2) * 100, 1)
+        a = float(r2.integers(0, 150))
+        out.append([x, y, int(r2.integers(1, 8)), a, a + 60, 5])
+    return out
+
+
+@pytest.mark.parametrize("alg", mx.VRP_ALGORITHMS[:-1])
+def test_vrptw_matches_brute_force(alg):
+    cust, dep = _tw_instance(), [50, 50, 0, 400]
+    exact = mx.brute_force_vrp(dep, cust, 15)
+    r = mx.solve_vrp(dep, cust, 15, 0, alg, 80, 20, 1)
+    assert r["cost"] == pytest.approx(exact, rel=1e-9) and r["feasible"]
+
+
+def test_vrptw_routes_respect_windows():
+    cust, dep = _tw_instance(), [50, 50, 0, 400]
+    r = mx.solve_vrp(dep, cust, 15, 0, "Comparar todos", 60, 20, 1)
+    pts = np.vstack([dep[:2], np.array(cust)[:, :2]])
+    for route in r["routes"]:
+        t, prev = 0.0, 0
+        for c in route:
+            t += float(np.hypot(*(pts[c] - pts[prev])))
+            assert t <= cust[c - 1][4] + 1e-9                 # llega antes del cierre
+            t = max(t, cust[c - 1][3]) + cust[c - 1][5]; prev = c
+        assert t + float(np.hypot(*(pts[0] - pts[prev]))) <= 400 + 1e-9
+
+
+@pytest.mark.parametrize("alg", mx.VRP_ALGORITHMS[:-1])
+def test_heterogeneous_fleet_matches_brute_force(alg):
+    rng = np.random.default_rng(3)
+    cust = [[*np.round(rng.random(2) * 100, 1), int(rng.integers(1, 10))] for _ in range(7)]
+    types = "10, 30, 1, 0\n25, 60, 1.2, 0"
+    exact = mx.brute_force_vrp([50, 50], cust, 0, types)
+    r = mx.solve_vrp([50, 50], cust, 0, 0, alg, 80, 20, 1, types)
+    assert r["cost"] == pytest.approx(exact, rel=1e-9)
+
+
+def test_vrp_unreachable_window_is_reported():
+    with pytest.raises(ValueError, match="a tiempo"):
+        mx.solve_vrp([0, 0, 0, 100], [[90, 90, 1, 0, 10, 0], [1, 1, 1, 0, 100, 0]], 10, 0,
+                     "Recocido Simulado", 10, 5, 1)
+
+
+# ── Programación con preparación, fechas de entrega y pesos ──────────────────
+@pytest.mark.parametrize("objective", mx.OBJECTIVES)
+@pytest.mark.parametrize("inst", [5, 7, 8])
+def test_flow_shop_objectives_exact(objective, inst):
+    P = np.random.default_rng(inst).integers(1, 20, (6, 4)).astype(float)
+    data = "\n".join(", ".join(f"{v:g}" for v in row) for row in P)
+    S = np.random.default_rng(inst + 1).integers(0, 6, (6, 6))
+    setup = "\n".join(" ".join(map(str, r)) for r in S)
+    due, w = "40, 55, 60, 70, 80, 95", "1, 2, 1, 3, 1, 2"
+    exact = mx.brute_force_scheduling("Flow shop", data, objective, due, w, setup)
+    for alg in mx.FLOW_ALGORITHMS[:-1]:
+        r = mx.solve_scheduling("Flow shop", data, alg, 80, 20, 1, objective, due, w, setup)
+        assert r["value"] == exact, (alg, r["value"], exact)
+
+
+@pytest.mark.parametrize("objective", mx.OBJECTIVES)
+def test_job_shop_setups_objectives_exact(objective):
+    js = "1 3, 2 2, 3 2\n1 2, 3 1, 2 4\n2 4, 3 3, 1 1"
+    args = ("6, 8, 9", "2, 1, 3", "0 1 2\n1 0 1\n2 1 0")
+    exact = mx.brute_force_scheduling("Job shop", js, objective, *args)
+    for alg in mx.JOB_ALGORITHMS[:-1]:
+        assert mx.solve_scheduling("Job shop", js, alg, 80, 20, 1, objective, *args)["value"] == exact
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_ft06_optimum_every_seed(seed):
+    for alg in mx.JOB_ALGORITHMS[:-1]:
+        assert mx.solve_scheduling("Job shop", mx.FT06, alg, 300, 40, seed)["makespan"] == 55
+
+
+def test_tardiness_requires_due_dates():
+    with pytest.raises(ValueError, match="fechas de entrega"):
+        mx.solve_scheduling("Flow shop", "1, 2\n3, 4", "Recocido Simulado", 10, 5, 1,
+                            "Tardanza total")
