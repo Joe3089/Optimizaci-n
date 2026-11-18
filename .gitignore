@@ -6,3 +6,4 @@ dist/
 .env
 .optimizer_config.json
 resultado.txt
+installer/Output/

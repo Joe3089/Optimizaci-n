@@ -20,6 +20,8 @@ from scripts.test_functions_data import (       # noqa: E402
     TEST_FUNCTIONS, INCOMPATIBLE_TESTS,
     INVENTORY_TESTS, INVENTORY_INCOMPATIBLE_TESTS,
 )
+from scripts.section_docs_data import section_tests  # noqa: E402
+
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -119,6 +121,20 @@ def generate_docx(path: str) -> None:
             r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
             para.add_run(t3[key])
 
+    doc.add_page_break()
+    doc.add_heading("5. Estadística, Investigación de Operaciones y Optimización — "
+                    "ejemplos precargados", level=1)
+    doc.add_paragraph("Cada resultado se obtiene ejecutando el ejemplo precargado del método "
+                      "al generar este documento.")
+    for i, t5 in enumerate(section_tests(), start=1):
+        doc.add_heading(f"5.{i}  {t5['funcion']}", level=2)
+        for label, key in (("Sección", "seccion"), ("Datos", "parametros"), ("Resultado", "resultado")):
+            para = doc.add_paragraph()
+            r = para.add_run(f"{label}: ")
+            r.bold = True
+            r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+            para.add_run(t5[key])
+
     doc.save(path)
 
 
@@ -193,6 +209,17 @@ def generate_pdf(path: str) -> None:
         elems.append(Paragraph(f"4.{i}  {_xesc(t3['funcion'])}  &rarr;  {_xesc(t3['metodo'])}", h2))
         elems.append(Paragraph(f"<b><font color='#1F4E79'>Motivo:</font></b> {_xesc(t3['motivo'])}", body))
         elems.append(Paragraph(f"<b><font color='#1F4E79'>Resultado en la app:</font></b> {_xesc(t3['resultado_app'])}", body))
+        elems.append(Spacer(1, 0.25*cm))
+    elems.append(PageBreak())
+
+    elems.append(Paragraph("5. Estadística, Investigación de Operaciones y Optimización — "
+                           "ejemplos precargados", h1))
+    elems.append(Paragraph("Cada resultado se obtiene ejecutando el ejemplo precargado del "
+                           "método al generar este documento.", body))
+    for i, t5 in enumerate(section_tests(), start=1):
+        elems.append(Paragraph(f"5.{i}  {_xesc(t5['funcion'])}", h2))
+        for label, key in (("Sección", "seccion"), ("Datos", "parametros"), ("Resultado", "resultado")):
+            elems.append(Paragraph(f"<b><font color='#1F4E79'>{label}:</font></b> {_xesc(t5[key])}", body))
         elems.append(Spacer(1, 0.25*cm))
 
     doc.build(elems)

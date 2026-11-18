@@ -151,27 +151,27 @@ def fibonacci_search(f, lo, hi, tol=1e-6):
     lo, hi = float(lo), float(hi)
     tol = max(float(tol), 1e-14)
 
-    # ── Calcular número de iteraciones necesarias ────────────────────────────
+    # ── Número de evaluaciones: F_N ≥ (b − a) / tol ─────────────────────────
     fibs = [1, 1]
     while fibs[-1] < (hi - lo) / tol:
         fibs.append(fibs[-1] + fibs[-2])
-    n = len(fibs) - 1          # índice máximo en fibs
+    if len(fibs) < 4:                       # garantiza al menos una reducción
+        fibs += [fibs[-1] + fibs[-2], fibs[-1] * 2 + fibs[-2]]
+    n = len(fibs) - 1
 
     f_lo = _safe_call(f, lo)
     f_hi = _safe_call(f, hi)
 
     a, b = lo, hi
     log  = []
-
-    rho1 = fibs[n - 2] / fibs[n]
-    rho2 = fibs[n - 1] / fibs[n]
-
-    lam = a + rho1 * (b - a)
-    mu  = a + rho2 * (b - a)
+    lam = a + fibs[n - 2] / fibs[n] * (b - a)
+    mu  = a + fibs[n - 1] / fibs[n] * (b - a)
     f_lam = _safe_call(f, lam)
     f_mu  = _safe_call(f, mu)
 
-    for k in range(1, n + 1):
+    # Recurrencia estándar: λ_k, μ_k ∈ [a_k, b_k] y el intervalo se reduce en
+    # la razón F_{n−k}/F_{n−k+1} en cada paso (k = 1 … n−2).
+    for k in range(1, n - 1):
         log.append({
             "k":        k,
             "iter":     k,
@@ -185,28 +185,24 @@ def fibonacci_search(f, lo, hi, tol=1e-6):
             "a":        a,
             "b":        b,
         })
-
-        if b - a < tol:
-            break
-
-        if f_lam < f_mu:
-            b     = mu
-            mu    = lam
-            f_mu  = f_lam
-            idx   = n - k - 1
-            ratio = fibs[max(idx - 1, 0)] / fibs[max(idx, 1)]
-            lam   = a + ratio * (b - a)
-            f_lam = _safe_call(f, lam)
+        if f_lam > f_mu:
+            a, lam, f_lam = lam, mu, f_mu
+            mu   = a + fibs[n - k - 1] / fibs[n - k] * (b - a)
+            f_mu = _safe_call(f, mu)
         else:
-            a     = lam
-            lam   = mu
-            f_lam = f_mu
-            idx   = n - k - 1
-            ratio = fibs[max(idx, 1)] / fibs[max(idx + 1, 1)]
-            mu    = a + ratio * (b - a)
-            f_mu  = _safe_call(f, mu)
+            b, mu, f_mu = mu, lam, f_lam
+            lam   = a + fibs[n - k - 2] / fibs[n - k] * (b - a)
+            f_lam = _safe_call(f, lam)
 
+    # Resultado del algoritmo: centro del intervalo final (se registra en el
+    # historial para que tabla, gráficas y resumen muestren el mismo x*).
     x_opt = (a + b) / 2.0
     f_opt = _safe_call(f, x_opt)
+    k_fin = len(log) + 1
+    log.append({
+        "k": k_fin, "iter": k_fin, "lambda_k": x_opt, "x": x_opt,
+        "f_lambda": f_opt, "f_k": f_opt, "f(x)": f_opt,
+        "mu_k": "—", "f_mu": "—", "a": a, "b": b,
+    })
 
     return x_opt, f_opt, f_lo, f_hi, log

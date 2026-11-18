@@ -77,6 +77,8 @@ def write_xlsx(path: str, session: list, *, logo_path: str = None) -> None:
             ws.row_dimensions[rn].height = height
 
     def _classify_study(metodo: str) -> str:
+        if report_content.is_problem_method(metodo):
+            return report_content.classify_study(metodo)
         if metodo in _METHODS_MD: return "Optimización Multidimensional (MD)"
         if metodo == "Fibonacci": return "Búsqueda Unidimensional — Sección Áurea / Fibonacci"
         if metodo in ("Armijo","Wolfe"): return "Búsqueda de Línea — Condiciones de Wolfe/Armijo"

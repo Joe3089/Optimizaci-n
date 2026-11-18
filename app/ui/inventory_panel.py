@@ -10,6 +10,7 @@
 # el combo principal (ver main_window._on_method / _populate_grouped_combo).
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 _QT = None
@@ -105,6 +106,26 @@ class InventoryPanel(QtWidgets.QFrame):
     haga el resto (sin duplicar lógica de cálculo/dashboard/exportación).
     """
     built = Signal(dict, str)
+    export_requested = Signal()          # «💾 Exportar»: recolectar los resultados
+
+    # Ejemplo de referencia («📋 Usar ejemplo»); el panel arranca vacío.
+    EXAMPLE = dict(D=1000.0, S=50.0, H=2.0, B=8.0, rate=0.2, d_diario=20.0, sigma_d=5.0,
+                   lead_time=7.0, nivel_servicio=0.95)
+    EXAMPLE_BREAKS = [(0, 10.0), (100, 9.0), (500, 8.0)]
+    # Claves aceptadas en un archivo (normalizadas con data_import.norm_key)
+    FILE_KEYS = {
+        "D": ("d", "demanda", "demandaanual", "danual"),
+        "S": ("s", "costopedido", "costodepedido", "costodeordenar", "costoporpedido", "pedido"),
+        "H": ("h", "costomantenimiento", "costodemantenimiento", "costodemantener",
+              "mantenimiento", "costoalmacenamiento"),
+        "B": ("b", "costofaltante", "costodefaltante", "faltante"),
+        "rate": ("tasa", "tasademantenimiento", "rate", "i", "tasamantenimiento"),
+        "d_diario": ("ddiario", "demandadiaria", "demandadiariapromedio", "dbarra"),
+        "sigma_d": ("sigmad", "desviacion", "desvestandardiaria", "desviacionestandardiaria",
+                    "sigma", "desvdiaria"),
+        "lead_time": ("leadtime", "tiempodeentrega", "tiempoentrega", "lt", "leadtimedias"),
+        "nivel_servicio": ("nivelservicio", "niveldeservicio", "nivel", "ns"),
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -126,6 +147,20 @@ class InventoryPanel(QtWidgets.QFrame):
         # ancho real del panel en vez de imponerle el suyo.
         self.lbl_title.setWordWrap(True)
         lay.addWidget(self.lbl_title)
+
+        # Datos del usuario: cargar archivo / usar ejemplo
+        from app.ui.problem_panel import data_buttons
+        bar = data_buttons(self)
+        self.btn_load, self.btn_example = bar.buttons
+        self.btn_load.clicked.connect(self._load_file_dialog)
+        self.btn_example.clicked.connect(self.load_example)
+        lay.addLayout(bar)
+        self.lbl_file = QtWidgets.QLabel("")
+        self.lbl_file.setWordWrap(True)
+        self.lbl_file.setStyleSheet("color:#3cff8a;font-size:10px;")
+        self.lbl_file.setVisible(False)
+        lay.addWidget(self.lbl_file)
+        self._labels: Dict[str, str] = {}
 
         # ── Campos comunes a varios modelos ──────────────────────────────
         self.row_D = self._field_row(lay, "Demanda anual (D):", "D", 1000.0)
@@ -199,7 +234,95 @@ class InventoryPanel(QtWidgets.QFrame):
         self.lbl_resultado.setWordWrap(True)
         lay.addWidget(self.lbl_resultado)
 
+        self.clear_values()               # arranca vacío: el usuario ingresa SU problema
         self.setVisible(False)
+
+    # ── Datos del usuario ────────────────────────────────────────────────
+    def _spin(self, key):
+        return getattr(self, f"spin_{key}")
+
+    def _is_blank(self, key) -> bool:
+        sp = self._spin(key)
+        return sp.value() <= sp.minimum()
+
+    def load_example(self) -> None:
+        for k, v in self.EXAMPLE.items():
+            self._spin(k).setValue(v)
+        self._set_breaks(self.EXAMPLE_BREAKS)
+        self.lbl_file.setText("📋 Ejemplo cargado: reemplázalo por tus datos si quieres.")
+        self.lbl_file.setVisible(True)
+
+    def clear_values(self) -> None:
+        for k in self.EXAMPLE:
+            sp = self._spin(k)
+            sp.setSpecialValueText(" ")      # el mínimo se muestra vacío = «sin dato»
+            sp.setValue(sp.minimum())
+        self._set_breaks([])
+        self._last_model = None
+        if hasattr(self, "lbl_error"):
+            self.lbl_error.setText(""); self.lbl_analitico.setText(""); self.lbl_resultado.setText("")
+        self.lbl_file.setVisible(False)
+
+    def _set_breaks(self, breaks) -> None:
+        self.tbl_breaks.setRowCount(max(len(breaks), 1))
+        for r in range(self.tbl_breaks.rowCount()):
+            q, p = breaks[r] if r < len(breaks) else ("", "")
+            self.tbl_breaks.setItem(r, 0, QtWidgets.QTableWidgetItem(f"{q:g}" if q != "" else ""))
+            self.tbl_breaks.setItem(r, 1, QtWidgets.QTableWidgetItem(f"{p:g}" if p != "" else ""))
+
+    def has_user_data(self) -> bool:
+        return any(not self._is_blank(k) for k in self.EXAMPLE)
+
+    def _load_file_dialog(self) -> None:
+        from app.infrastructure import data_import as di
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Selecciona los datos de inventario", "", di.FILE_FILTER)
+        if path:
+            try:
+                self.load_file(path)
+            except ValueError as ex:
+                QtWidgets.QMessageBox.warning(self, "Cargar archivo", str(ex))
+
+    def load_file(self, path: str, exercise: Optional[int] = None) -> List[str]:
+        """Lee «clave: valor» (D, S, H, B, tasa, demanda diaria, σ, lead time, nivel
+        de servicio) y filas «tramo: cantidad, precio» de CSV/Excel/Word/PDF."""
+        from app.infrastructure import data_import as di
+        from app.ui.exercise_dialog import choose_exercise
+        _r = di.resolve_exercise(path, exercise,
+                                 lambda exs, name: choose_exercise(self, exs, name))
+        if _r is None:
+            return []                    # el usuario canceló la selección del ejercicio
+        path, shown = _r
+        pairs = di.read_pairs(path)
+        filled = []
+        for attr, keys in self.FILE_KEYS.items():
+            for k, v in pairs.items():
+                label = di.norm_key(self._labels.get(attr, "").split("(")[0])
+                if k in keys or (label and len(k) >= 4 and (
+                        label.startswith(k) or k.startswith(label))):
+                    num = v.split(",")[0].strip()
+                    if not di.is_number(num):
+                        raise ValueError(f"El valor de «{k}» no es numérico: «{v}».")
+                    self._spin(attr).setValue(float(num.replace(",", ".")))
+                    filled.append(attr)
+                    break
+        breaks = []
+        for ln in di.read_text_lines(path):
+            low = di.norm_key(ln.split(":")[0].split(",")[0])
+            if low.startswith("tramo"):
+                nums = [c for c in re.split(r"[,;\s:]+", ln) if di.is_number(c)]
+                if len(nums) >= 2:
+                    breaks.append((float(nums[-2]), float(nums[-1])))
+        if breaks:
+            self._set_breaks(breaks)
+            filled.append("tramos")
+        if not filled:
+            raise ValueError("No se reconocieron datos de inventario. Escribe una línea "
+                             "«campo: valor» por dato, por ejemplo «Demanda anual (D): 1000», "
+                             "«Costo de pedido (S): 50», «Costo de mantenimiento (H): 2».")
+        self.lbl_file.setText(f"📂 Cargado: {shown} → {', '.join(filled)}")
+        self.lbl_file.setVisible(True)
+        return filled
 
     # ── helpers de construcción ──────────────────────────────────────────
     def _field_row(self, lay, label_text, attr_prefix, default, decimals=4, step=1.0,
@@ -214,6 +337,7 @@ class InventoryPanel(QtWidgets.QFrame):
         row = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(row); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
         lbl = QtWidgets.QLabel(label_text)
+        self._labels[attr_prefix] = label_text
         lbl.setWordWrap(True)   # ver nota en lbl_title: evita que una etiqueta
                                 # larga fuerce el ancho de todo el panel
         v.addWidget(lbl)
@@ -292,6 +416,17 @@ class InventoryPanel(QtWidgets.QFrame):
     def _on_generar(self):
         self.lbl_error.setText(""); self.lbl_resultado.setText("")
         if not self._model_key:
+            return
+        # Ningún dato visible del modelo puede quedar vacío
+        rows = {"D": self.row_D, "S": self.row_S, "H": self.row_H, "B": self.row_B,
+                "rate": self.row_rate, "d_diario": self.row_d_diario,
+                "sigma_d": self.row_sigma_d, "lead_time": self.row_lead,
+                "nivel_servicio": self.row_nivel}
+        missing = [self._labels[k].rstrip(":") for k, row in rows.items()
+                   if not row.isHidden() and self._is_blank(k)]
+        if missing:
+            self.lbl_error.setText("Falta ingresar: " + ", ".join(missing) +
+                                   ". Escríbelos, usa «📂 Cargar archivo» o «📋 Usar ejemplo».")
             return
         try:
             if self._model_key == "eoq_clasico":

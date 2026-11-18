@@ -15,14 +15,16 @@ import sys
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.method_docs_data import METHODS, COMPAT_MATRIX, CATEGORIES, AI_IMPLEMENTATION  # noqa: E402
+from scripts.method_docs_data import (  # noqa: E402
+    METHODS, COMPAT_MATRIX, CATEGORIES, AI_IMPLEMENTATION, DASHBOARD_IMPLEMENTATION)
 from app.domain.inventory.catalog import INVENTORY_FUNCTIONS, INVENTORY_CATEGORY  # noqa: E402
+from scripts.section_docs_data import SECTION_METHODS, SECTION_CATEGORIES, with_examples  # noqa: E402
 
 # Funciones de inventario (Fase 6 del módulo de Inventario): mismo esquema
 # de diccionario que METHODS, así que se agregan sin tocar la lógica de
 # render de generate_docx/generate_pdf — solo aparece una categoría más.
-METHODS    = METHODS + INVENTORY_FUNCTIONS
-CATEGORIES = CATEGORIES + [INVENTORY_CATEGORY]
+METHODS    = METHODS + INVENTORY_FUNCTIONS + with_examples(SECTION_METHODS)
+CATEGORIES = CATEGORIES + [INVENTORY_CATEGORY] + SECTION_CATEGORIES
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -78,6 +80,8 @@ def generate_docx(path: str) -> None:
     doc.add_paragraph("2. Matriz de compatibilidad función ↔ método")
     for i, cat in enumerate(CATEGORIES, start=3):
         doc.add_paragraph(f"{i}. {cat}")
+    doc.add_paragraph(f"{len(CATEGORIES) + 3}. Implementación del Agente de IA (Opti)")
+    doc.add_paragraph(f"{len(CATEGORIES) + 4}. Dashboard: sincronización, tablas y visualizaciones")
     doc.add_page_break()
 
     # Introducción
@@ -85,12 +89,13 @@ def generate_docx(path: str) -> None:
     doc.add_paragraph(
         "Este documento describe, de forma completa y verificada contra la "
         "implementación real del Optimizador (no valores genéricos de libro "
-        "de texto), los 32 métodos de optimización disponibles en la "
+        "de texto), los 32 métodos de optimización con función f(x) disponibles en la "
         "aplicación: 8 unidimensionales/de gradiente, 3 metaheurísticos, "
         "6 restringidos (penalización/barrera/suma), y 14 multiobjetivo "
         "(4 técnicas clásicas del proyecto + 10 del motor de escalarización, "
         "Fase 6-8)."
     )
+    doc.add_paragraph(("Además documenta los 4 modelos de inventario y los " + str(len(SECTION_METHODS)) + " métodos basados en datos de las secciones de Estadística, Investigación de Operaciones y Optimización (programación lineal, transporte, asignación, programación dinámica, combinatoria y optimización cuántica)."))
     doc.add_paragraph(
         "Para cada método se incluye: fórmula, descripción, requisitos "
         "matemáticos, convergencia, ventajas, desventajas, cuándo usarlo y "
@@ -146,6 +151,17 @@ def generate_docx(path: str) -> None:
         doc.add_heading(subtitulo, level=2)
         doc.add_paragraph(texto)
 
+    # Dashboard
+    doc.add_page_break()
+    doc.add_heading(f"{section_num + 1}. Dashboard: sincronización, tablas y visualizaciones",
+                    level=1)
+    doc.add_paragraph(
+        "Cómo el dashboard presenta los resultados del motor y se mantiene sincronizado "
+        "con el método seleccionado — ver app/ui/main_window.py y app/ui/dashboard_views.py.")
+    for subtitulo, texto in DASHBOARD_IMPLEMENTATION:
+        doc.add_heading(subtitulo, level=2)
+        doc.add_paragraph(texto)
+
     doc.save(path)
 
 
@@ -188,10 +204,11 @@ def generate_pdf(path: str) -> None:
     elems.append(Paragraph("1. Introducción", h1))
     elems.append(Paragraph(
         "Este documento describe, de forma completa y verificada contra la "
-        "implementación real del Optimizador, los 32 métodos de optimización "
+        "implementación real del Optimizador, los 32 métodos de optimización con f(x) "
         "disponibles: 8 unidimensionales/de gradiente, 3 metaheurísticos, "
         "6 restringidos (penalización/barrera/suma), y 14 multiobjetivo "
         "(4 técnicas clásicas del proyecto + 10 del motor de escalarización).", body))
+    elems.append(Paragraph(("Además documenta los 4 modelos de inventario y los " + str(len(SECTION_METHODS)) + " métodos basados en datos de las secciones de Estadística, Investigación de Operaciones y Optimización (programación lineal, transporte, asignación, programación dinámica, combinatoria y optimización cuántica)."), body))
     elems.append(Spacer(1, 0.3*cm))
     elems.append(Paragraph(
         "Cuando un usuario selecciona una combinación método-función "
@@ -242,6 +259,20 @@ def generate_pdf(path: str) -> None:
         "genérica) — ver app/infrastructure/ai_assistant.py.", body))
     elems.append(Spacer(1, 0.2*cm))
     for subtitulo, texto in AI_IMPLEMENTATION:
+        elems.append(Paragraph(_xesc(subtitulo), h2))
+        elems.append(Paragraph(_xesc(texto), body))
+        elems.append(Spacer(1, 0.2*cm))
+
+    # Dashboard
+    elems.append(PageBreak())
+    elems.append(Paragraph(
+        f"{section_num + 1}. Dashboard: sincronización, tablas y visualizaciones", h1))
+    elems.append(Paragraph(
+        "Cómo el dashboard presenta los resultados del motor y se mantiene sincronizado "
+        "con el método seleccionado — ver app/ui/main_window.py y "
+        "app/ui/dashboard_views.py.", body))
+    elems.append(Spacer(1, 0.2*cm))
+    for subtitulo, texto in DASHBOARD_IMPLEMENTATION:
         elems.append(Paragraph(_xesc(subtitulo), h2))
         elems.append(Paragraph(_xesc(texto), body))
         elems.append(Spacer(1, 0.2*cm))

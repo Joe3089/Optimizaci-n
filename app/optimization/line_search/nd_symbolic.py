@@ -132,6 +132,86 @@ def newton_armijo(
     
     return x_k, y_opt, log_data
 
+def newton_wolfe(
+    func_str: str,
+    var_str: str,
+    x0: list,
+    c1: float = 1e-4,
+    c2: float = 0.9,
+    max_iter: int = 100,
+    tolerance: float = 1e-6,
+):
+    """
+    Método de Newton completo con búsqueda de línea de Wolfe fuerte:
+        f(x+αd) ≤ f(x) + c1·α·∇fᵀd           (descenso suficiente)
+        |∇f(x+αd)ᵀd| ≤ c2·|∇f(x)ᵀd|          (curvatura)
+    Si el Hessiano es singular o no da una dirección de descenso, usa −∇f.
+    Itera hasta ‖∇f‖ < tolerancia. Devuelve (x_opt, y_opt, log_data) con el
+    mismo formato de log que newton_armijo.
+    """
+    vars_sym = sympy.symbols(var_str)
+    if not isinstance(vars_sym, (list, tuple)):
+        vars_sym = (vars_sym,)
+    try:
+        f_sym = sympy.sympify(func_str)
+    except sympy.SympifyError:
+        return None, None, []
+    grad_sym = [f_sym.diff(var) for var in vars_sym]
+    hess_sym = [[f_sym.diff(v1, v2) for v2 in vars_sym] for v1 in vars_sym]
+    modules = [{'DiracDelta': lambda x: 0.0, 'Heaviside': lambda x: np.heaviside(x, 1.0)}, 'numpy']
+    f_num = sympy.lambdify(vars_sym, f_sym, modules)
+    g_num = sympy.lambdify(vars_sym, grad_sym, modules)
+    h_num = sympy.lambdify(vars_sym, hess_sym, modules)
+
+    def grad(x):
+        return np.array(g_num(*x), dtype=float).ravel()
+
+    log_data = []
+    x_k = np.array(x0, dtype=float)
+    for k in range(max_iter):
+        f_k = float(f_num(*x_k))
+        g_k = grad(x_k)
+        g_norm = float(np.linalg.norm(g_k))
+        entry = {"k": k, "x_k": x_k.copy(), "x_k_str": np.array2string(x_k, precision=4),
+                 "f_k": f_k, "grad_norm": g_norm, "alpha_k": 0.0, "d_k_str": "N/A",
+                 "direccion": "—"}
+        if g_norm < tolerance:
+            log_data.append(entry)
+            break
+
+        kind = "Newton"
+        try:
+            d_k = np.linalg.solve(np.array(h_num(*x_k), dtype=float), -g_k)
+            if not np.all(np.isfinite(d_k)) or g_k @ d_k >= -1e-12 * g_norm * np.linalg.norm(d_k):
+                raise np.linalg.LinAlgError
+        except np.linalg.LinAlgError:
+            d_k, kind = -g_k, "Descenso (−∇f)"
+        slope = float(g_k @ d_k)
+
+        # Búsqueda de α: expansión hasta acotar y bisección dentro del intervalo.
+        lo, hi, alpha = 0.0, np.inf, 1.0
+        for _ in range(60):
+            x_new = x_k + alpha * d_k
+            f_new = float(f_num(*x_new))
+            if not np.isfinite(f_new) or f_new > f_k + c1 * alpha * slope:
+                hi = alpha
+            else:
+                s_new = float(grad(x_new) @ d_k)
+                if abs(s_new) <= c2 * abs(slope):
+                    break
+                if s_new > 0:
+                    hi = alpha
+                else:
+                    lo = alpha
+            alpha = 2 * alpha if np.isinf(hi) else 0.5 * (lo + hi)
+
+        entry.update(alpha_k=alpha, d_k_str=np.array2string(d_k, precision=4), direccion=kind)
+        log_data.append(entry)
+        x_k = x_k + alpha * d_k
+
+    return x_k, float(f_num(*x_k)), log_data
+
+
 def wolfe_line_search(
     func_str: str,
     var_str: str,

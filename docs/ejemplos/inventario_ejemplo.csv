@@ -1,0 +1,6 @@
+producto;demanda;costo_pedido;costo_mantener;precio;demanda_diaria;desv_diaria;lead_time;nivel_servicio
+Tornillo;12000;40;0.5;0.8;33;6;5;0.95
+Motor;400;120;30;250;1.1;0.4;14;0.98
+Correa;2500;60;2;12;7;2;7;0.95
+Filtro;5000;50;1.5;6;14;3;4;0.90
+Sensor;150;80;18;95;0.4;0.2;21;0.99

@@ -102,8 +102,9 @@ TEST_FUNCTIONS = [
             "UnicodeEncodeError se camuflaba como incompatibilidad de "
             "función. Corregido reemplazando los símbolos por texto ASCII "
             "en los prints de diagnóstico (sin efecto funcional). Verificado "
-            "tras el fix: Wolfe converge en 8 iteraciones, condición de Wolfe "
-            "satisfecha (1.976563 ≤ 4.8)."
+            "tras el fix. Wolfe ahora es un método de Newton completo con "
+            "búsqueda de línea de Wolfe fuerte: converge a (1, 1) en 20 "
+            "iteraciones con ‖∇f‖ < 1e-6."
         ),
     ),
     dict(

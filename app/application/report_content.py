@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from app.application.problem_catalog import (
+    DATA_PREFIX, SPEC_BY_LABEL, is_problem_method, style_figure,
+)
+
 try:
     import sympy as sp
     _SYMPY = True
@@ -81,8 +85,31 @@ def load_logo(path: str, max_px: int = 200) -> Optional[io.BytesIO]:
         return None
 
 
+def _catalog_plot_png(entry: dict) -> list:
+    """Gráfica de un método del catálogo, con la misma función que usa la pantalla."""
+    plot = entry.get("plot_fn")
+    if plot is None:
+        return []
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    fig = Figure(figsize=(8, 4.5), facecolor="#0a1228")
+    FigureCanvasAgg(fig)
+    try:
+        plot(fig)
+        style_figure(fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#0a1228")
+    except Exception as e:
+        print(f"[plot catálogo export err] {e}")
+        return []
+    buf.seek(0)
+    return [(buf, "Gráfica")]
+
+
 def generate_plot_png(entry: dict) -> list:
     """Genera PNGs 2D y 3D de alta calidad para exportación, con misma estética que pantalla."""
+    if is_problem_method(entry.get("metodo", "")):
+        return _catalog_plot_png(entry)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -242,6 +269,8 @@ def generate_plot_png(entry: dict) -> list:
 
 def describe_function(fx: str) -> str:
     """Descripción breve y matemática de la función."""
+    if fx.startswith(DATA_PREFIX):
+        return "El estudio parte de los datos ingresados, no de una función f(x). " + fx
     fx_l = fx.lower().replace(" ", "")
     if any(k in fx_l for k in ("sin", "cos", "tan")):
         return (f"La función f(x) = {fx} es de tipo trigonométrico. "
@@ -277,6 +306,8 @@ def describe_function(fx: str) -> str:
 
 def describe_applicable_studies(fx: str) -> str:
     """Explica qué tipos de estudio son aplicables a la función y por qué."""
+    if fx.startswith(DATA_PREFIX):
+        return "Los métodos aplicables dependen de la estructura de los datos; ver cada estudio."
     fx_l = fx.lower().replace(" ", "")
     es_trig = any(k in fx_l for k in ("sin", "cos", "tan"))
     es_exp  = any(k in fx_l for k in ("exp", "log", "ln"))
@@ -307,6 +338,8 @@ def describe_applicable_studies(fx: str) -> str:
 
 def justify_method(metodo: str, fx: str) -> str:
     """Explica por qué se seleccionó este método para esta función."""
+    if is_problem_method(metodo):
+        return SPEC_BY_LABEL[metodo].info
     fx_l = fx.lower().replace(" ", "")
     justificaciones = {
         "Armijo": (
@@ -534,6 +567,10 @@ def build_step_by_step(entry: dict) -> list:
     derivados directamente del historial de iteraciones.
     Retorna: lista de (título, descripción) por iteración.
     """
+    if is_problem_method(entry.get("metodo", "")):
+        return [("Planteamiento", entry.get("fx", "")),
+                ("Método", SPEC_BY_LABEL[entry["metodo"]].info),
+                ("Resultado", entry.get("resumen", ""))]
     hist   = entry.get("hist", [])
     metodo = entry.get("metodo", "")
     fx     = entry.get("fx", "")
@@ -661,6 +698,8 @@ def build_step_by_step(entry: dict) -> list:
 
 def classify_study(metodo: str) -> str:
     """Clasifica el tipo de estudio según el método."""
+    if is_problem_method(metodo):
+        return f"{SPEC_BY_LABEL[metodo].section}: {SPEC_BY_LABEL[metodo].group}"
     md_keywords = ("MD","Penalización","Pen.","Barrera","BFGS","Nelder","Newton MD","Grad. Conj.")
     if any(k in metodo for k in md_keywords):
         return "Optimización Multidimensional (MD)"
@@ -686,6 +725,8 @@ def classify_study(metodo: str) -> str:
 
 def classify_function(fx: str) -> str:
     """Clasifica la función por tipo matemático, incluyendo funciones de prueba conocidas."""
+    if fx.startswith(DATA_PREFIX):
+        return "Problema definido por datos (sin función f(x))"
     fx_l = fx.lower().replace(" ", "")
     # Funciones de prueba conocidas del PDF
     if "rosenbrock" in fx_l or ("(1-x)**2" in fx_l and "100" in fx_l):

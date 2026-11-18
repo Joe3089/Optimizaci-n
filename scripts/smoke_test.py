@@ -194,6 +194,75 @@ def test_reset_button(win: InterfazOptimizacion) -> None:
         FAILURES.append(("botón Limpiar/reset", f"{type(ex).__name__}: {ex}"))
 
 
+def test_sections(win: InterfazOptimizacion) -> None:
+    """Corre desde la interfaz el ejemplo precargado de cada método del catálogo
+    y exporta la sesión, que mezcla todos los tipos de tabla."""
+    from app.application.problem_catalog import SPECS, SECTION_OPT
+    from app.infrastructure.reporting import csv_export, docx_export, xlsx_export, pdf_export
+    win.limpiar()
+    for spec in SPECS:
+        ERR_DIALOGS.clear()
+        try:
+            assert win.select_method(spec.label), "no aparece en el combo"
+            assert win.cmb_sec.currentText() == spec.section, "sección incorrecta"
+            assert win.prob_panel.isVisibleTo(win.prob_panel.parent()), "panel oculto"
+            assert not win.prob_panel.has_user_data(), "el panel no debe precargar datos"
+            win.prob_panel.load_example()
+            win.ejecutar()
+            assert not ERR_DIALOGS, f"diálogo de error: {ERR_DIALOGS}"
+            assert win.lbl_st.text().startswith("✓"), win.lbl_st.text()
+            assert win.table.rowCount() > 0, "tabla vacía"
+            PASSES.append(f"UI: {spec.label}")
+        except Exception as ex:
+            FAILURES.append((f"UI: {spec.label}", f"{type(ex).__name__}: {ex}"))
+
+    # El historial debe guardar los datos de cada corrida y restaurarlos.
+    try:
+        win.select_method("PL: Simplex")
+        win.prob_panel.load_example()
+        win.prob_panel.set_values({"c": "1, 1"})
+        win.ejecutar()
+        entry = win._history_log[-1]
+        assert entry["params"]["c"] == "1, 1", entry.get("params")
+        win.prob_panel.set_values({"c": "9, 9"})
+        win.select_method("Estadística Descriptiva")
+        win.select_method(entry["metodo"])
+        if entry.get("params"):
+            win.prob_panel.set_values(entry["params"])
+        assert win.prob_panel.values()["c"] == "1, 1", win.prob_panel.values()["c"]
+        PASSES.append("UI: historial guarda los datos de la corrida")
+    except Exception as ex:
+        FAILURES.append(("UI: historial guarda los datos de la corrida", f"{type(ex).__name__}: {ex}"))
+
+    # Un método clásico debe seguir funcionando después de un método de catálogo.
+    win.select_method("Búsqueda Local")
+    win.edt_fx.setText("x**2 - 4*x + 5"); win.smin.setValue(0.0); win.smax.setValue(5.0)
+    win.ejecutar()
+    if win.lbl_st.text().startswith("✓") and win.edt_fx.isVisibleTo(win.edt_fx.parent()):
+        PASSES.append("UI: método clásico tras el catálogo")
+    else:
+        FAILURES.append(("UI: método clásico tras el catálogo", win.lbl_st.text()))
+
+    tmp = tempfile.mkdtemp(prefix="optimizador_secciones_")
+    logo = win._logo_path()
+    exports = [
+        ("CSV", lambda: csv_export.write_csv_db(tmp, win._session, getattr(win, "_history_log", []))),
+        ("XLSX", lambda: xlsx_export.write_xlsx(os.path.join(tmp, "s.xlsx"), win._session, logo_path=logo)),
+        ("PDF", lambda: pdf_export.write_pdf(os.path.join(tmp, "s.pdf"), win._session, area_key="general", logo_path=logo)),
+    ]
+    if hasattr(docx_export, "write_docx"):
+        exports.append(("DOCX", lambda: docx_export.write_docx(os.path.join(tmp, "s.docx"), win._session, area_key="general", logo_path=logo)))
+    for name, fn in exports:
+        try:
+            fn()
+            PASSES.append(f"export secciones {name}")
+        except Exception as ex:
+            FAILURES.append((f"export secciones {name}", f"{type(ex).__name__}: {ex}\n{traceback.format_exc()}"))
+    win.limpiar()
+    win.select_method("Búsqueda Local")
+    win.cmb_sec.setCurrentText(SECTION_OPT)
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     win = InterfazOptimizacion(resource_path=lambda p: p)
@@ -211,6 +280,8 @@ def main() -> int:
         test_validations(win)
     elif only == "--reset":
         test_reset_button(win)
+    elif only == "--sections":
+        test_sections(win)
     elif only:
         run_method_case(win, only)
     else:
@@ -220,6 +291,7 @@ def main() -> int:
         test_ai_config_roundtrip()
         test_validations(win)
         test_reset_button(win)
+        test_sections(win)
 
     print(f"\n{'='*70}\nRESULTADO: {len(PASSES)} OK, {len(FAILURES)} FALLOS "
           f"(de {len(all_methods)} métodos + exports + config IA)\n{'='*70}")

@@ -118,6 +118,100 @@ except Exception:
 _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+
+# ─── Estado compartido de proveedores (chat + intervención automática) ────────
+# Evita repetir llamadas condenadas a fallar: el bloqueo de red de Groq (403) y
+# el cupo diario de OpenRouter se recuerdan; así el chat y la explicación
+# automática no agotan el cupo con reintentos en cascada.
+import threading as _threading
+import time as _time_mod
+
+_PROVIDER_BLOCK: dict = {}          # provider -> (hasta_epoch, mensaje)
+_OR_STATE = {"models": None, "fetched": 0.0, "dead": set(),
+             "lock": _threading.Lock()}
+
+# Preferencia (rápidos y de chat primero). Solo se usan los que sigan gratis en
+# /api/v1/models; si esa consulta falla se usa esta lista tal cual.
+_OR_PREFERRED = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "inclusionai/ling-3.2-flash:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/free",
+]
+
+
+def _block_provider(provider: str, seconds: float, message: str) -> str:
+    _PROVIDER_BLOCK[provider] = (_time_mod.time() + max(60.0, seconds), message)
+    return message
+
+
+def _provider_blocked(provider: str) -> str:
+    until, msg = _PROVIDER_BLOCK.get(provider, (0.0, ""))
+    return msg if until > _time_mod.time() else ""
+
+
+def reset_provider_blocks():
+    """Olvida los bloqueos recordados (al cambiar de key o pulsar Probar keys)."""
+    _PROVIDER_BLOCK.clear()
+    _OR_STATE["dead"].clear()
+
+
+def _strip_sponsor(text: str) -> str:
+    """Quita el bloque publicitario que el nivel anónimo de Pollinations puede
+    añadir al final ('---' + Sponsor/Ad/🌸)."""
+    import re as _re
+    text = (text or "").strip()
+    m = _re.search(r"\n\s*-{3,}\s*\n.*(sponsor|\bad\b|🌸|pollinations)", text,
+                   _re.IGNORECASE | _re.DOTALL)
+    return text[:m.start()].strip() if m else text
+
+
+def is_quota_or_block_error(msg: str) -> bool:
+    """Errores que NO se arreglan reintentando (solo gastarían cupo/tiempo)."""
+    first = (msg or "").split("\n", 1)[0]
+    return any(x in first for x in ("cupo gratuito", "bloqueado por la red"))
+
+
+def _seconds_to_utc_midnight() -> float:
+    return 86400.0 - (_time_mod.time() % 86400.0) + 30.0
+
+
+def _openrouter_models(key: str) -> list:
+    """Modelos de texto gratuitos vigentes, en orden de preferencia (cache 6 h)."""
+    with _OR_STATE["lock"]:
+        if _OR_STATE["models"] is None or _time_mod.time() - _OR_STATE["fetched"] > 21600:
+            free = []
+            try:
+                req = urllib.request.Request(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {key}", "User-Agent": _BROWSER_UA})
+                with urllib.request.urlopen(req, timeout=8, context=_ssl_ctx()) as resp:
+                    for m in json.loads(resp.read().decode("utf-8")).get("data", []):
+                        pr = m.get("pricing", {}) or {}
+                        arch = m.get("architecture", {}) or {}
+                        outs = arch.get("output_modalities") or ["text"]
+                        if (str(pr.get("prompt")) == "0" and str(pr.get("completion")) == "0"
+                                and outs == ["text"]):
+                            free.append(m["id"])
+            except Exception:
+                free = []
+            if free:
+                pref = [m for m in _OR_PREFERRED if m in free and m != "openrouter/free"]
+                rest = [m for m in free if m not in pref and m != "openrouter/free"]
+                models = pref + rest
+                if "openrouter/free" in free:
+                    models.append("openrouter/free")
+                _OR_STATE["models"] = models
+            else:
+                _OR_STATE["models"] = list(_OR_PREFERRED)
+            _OR_STATE["fetched"] = _time_mod.time()
+        models = list(_OR_STATE["models"])
+    alive = [m for m in models if m not in _OR_STATE["dead"]]
+    return alive or ["openrouter/free"]
+
 import ssl as _ssl
 def _ssl_ctx():
     """
@@ -946,8 +1040,14 @@ _METHOD_RULES: Dict[str, Dict] = {
 }
 
 
-_SYSTEM_PROMPT = """Eres el Asistente de IA del Optimizador de Funciones, una aplicación \
-de optimización matemática desarrollada en Python con PyQt.
+_SYSTEM_PROMPT = """Eres Opti, el asistente inteligente del Optimizador de Funciones, una \
+aplicación de optimización matemática desarrollada en Python con PyQt. Si te preguntan \
+quién eres, preséntate como Opti. Tu personalidad: amigable, profesional sin excesiva \
+formalidad, didáctico, paciente y motivador; explicas lo complejo con palabras sencillas \
+y nunca culpas al usuario. No modificas la función del usuario ni ejecutas cambios por tu \
+cuenta: propones alternativas y el usuario decide si las prueba. Si el contexto incluye un \
+evento detectado automáticamente (error, infinito, NaN, desbordamiento…), úsalo para \
+responder preguntas como "¿por qué me dio infinito?" sin pedir de nuevo los datos.
 
 ## TU ROL
 Eres un experto en optimización numérica y metaheurísticas. Tu ÚNICA función es asistir \
@@ -961,7 +1061,8 @@ al usuario con todo lo relacionado a esta aplicación y sus métodos matemático
 
 ### Búsqueda de línea:
 - Armijo: condición de descenso suficiente f(x+αd) ≤ f(x)+c·α·∇f·d
-- Wolfe: Armijo + condición de curvatura |∇f(x+αd)·d| ≤ c₂|∇f(x)·d|
+- Wolfe: método de Newton completo cuyo paso α cumple Wolfe fuerte: Armijo +
+  curvatura |∇f(x+αd)·d| ≤ c₂|∇f(x)·d|; itera hasta ‖∇f‖ < 1e-6
 - Goldstein: Armijo + cota inferior para evitar pasos muy pequeños
 
 ### Newton clásico:
@@ -1101,6 +1202,69 @@ Newton-Raphson, PSO, GA, Recocido Simulado, etc.). \
 """
 
 
+def _catalog_prompt() -> str:
+    """Sección del prompt con los métodos de Estadística, Investigación de
+    Operaciones y Optimización, generada del mismo catálogo que usa la
+    interfaz para que nombres y descripciones nunca se desalineen."""
+    try:
+        from app.application.problem_catalog import SECTIONS, SPECS
+    except Exception:
+        return ""
+    lines = [
+        "### Secciones de la aplicación y métodos basados en datos",
+        "El panel de control tiene un selector «Sección» con tres opciones: "
+        + ", ".join(SECTIONS) + ". Los métodos anteriores (1D, ND, MD, metaheurísticos, "
+        "multiobjetivo) están en «Optimización»; los 4 modelos de inventario están en "
+        "«Investigación de Operaciones». Los métodos de esta lista NO usan f(x): cada uno "
+        "abre un formulario con un ejemplo precargado y se resuelve con «Calcular».",
+        "Formato de entrada: punto decimal, valores separados por comas; restricciones "
+        "como «1, 2 <= 10», una por línea.",
+    ]
+    current = None
+    for s in SPECS:
+        if (s.section, s.group) != current:
+            current = (s.section, s.group)
+            lines.append(f"#### {s.section} — {s.group}")
+        campos = ", ".join(f.label.rstrip(":") for f in s.fields)
+        lines.append(f"- **{s.label}**: {s.info} Datos: {campos}.")
+    lines.append(
+        "Los algoritmos cuánticos se ejecutan en un simulador de vector de estado local "
+        "(no en hardware cuántico), con un máximo de 8 a 16 qubits según el método.")
+    lines.append(
+        "Cuando el problema del usuario encaje con uno de estos métodos, recomiéndalo por "
+        "su nombre EXACTO (en negrita, tal como aparece arriba): la aplicación lo detecta "
+        "y lo activa automáticamente, cambiando de sección si hace falta.")
+    return "\n".join(lines) + "\n\n"
+
+
+_SYSTEM_PROMPT = _SYSTEM_PROMPT.replace(
+    "## FUNCIONES SOPORTADAS", _catalog_prompt() + "## FUNCIONES SOPORTADAS", 1)
+_SYSTEM_PROMPT = _SYSTEM_PROMPT.replace(
+    "11. Detectar problemas de inventario",
+    "12. Identificar problemas de estadística, programación lineal, transporte, asignación,\n"
+    "    programación dinámica, combinatoria u optimización cuántica y recomendar el método\n"
+    "    exacto del catálogo\n11. Detectar problemas de inventario", 1)
+
+
+def detect_method_label(text: str) -> Optional[str]:
+    """Primer nombre exacto de método (inventario o catálogo) citado en `text`.
+    Se prueban primero los nombres más largos, para que «PL: Simplex Acotado…»
+    no se confunda con «PL: Simplex»."""
+    labels: List[str] = []
+    try:
+        from app.domain.inventory import INVENTORY_METHOD_LABELS
+        labels += list(INVENTORY_METHOD_LABELS)
+    except Exception:
+        pass
+    try:
+        from app.application.problem_catalog import SPECS
+        labels += [s.label for s in SPECS]
+    except Exception:
+        pass
+    found = [(text.find(lbl), -len(lbl), lbl) for lbl in labels if lbl in text]
+    return min(found)[2] if found else None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Detectar proveedor por formato de key
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1211,7 +1375,62 @@ class _AIWorker(QThread):
             except Exception as ex:
                 last_err = f"Error de conexión: {ex}"
 
+        # Respaldo final sin key (Groq bloqueado por red / cupo de OpenRouter
+        # agotado). No se usa si el problema es una key inválida.
+        if "inválida" not in last_err and "401" not in last_err:
+            try:
+                ok = self._call_pollinations()
+                if ok is True:
+                    self.provider_used.emit("pollinations")
+                    return
+                # la 1.ª línea decide si vale la pena reintentar
+                # (is_quota_or_block_error): manda el estado de Pollinations
+                last_err = f"{ok}\n({last_err})"
+            except Exception as ex:
+                last_err = f"Pollinations: {ex}\n({last_err})"
+
         self.error_occurred.emit(last_err)
+
+    # ── Pollinations (respaldo gratuito sin API key) ──────────────────────────
+    def _call_pollinations(self):
+        blocked = _provider_blocked("pollinations")
+        if blocked:
+            return blocked
+        messages = [{"role": "system", "content": self._system}] + self._messages
+        payload = json.dumps({"model": "openai-fast", "messages": messages,
+                              "temperature": 0.7, "private": True}).encode("utf-8")
+        try:
+            data = None
+            for attempt in range(3):     # el nivel anónimo da 400/402/5xx intermitentes
+                req = urllib.request.Request(
+                    "https://text.pollinations.ai/openai", data=payload, method="POST",
+                    headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA})
+                try:
+                    with urllib.request.urlopen(req, timeout=40, context=_ssl_ctx()) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError as e:
+                    if (e.code in (400, 402) or e.code >= 500) and attempt < 2:
+                        import time as _time
+                        _time.sleep(2.0 + 2.0 * attempt)
+                        continue
+                    raise
+            content = _strip_sponsor((data["choices"][0]["message"].get("content") or ""))
+            if content:
+                self.response_ready.emit(content)
+                return True
+            return "Pollinations: respuesta vacía."
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return _block_provider("pollinations", 60,
+                                       "Pollinations: demasiadas solicitudes, espera un minuto.")
+            try:
+                detail = e.read().decode("utf-8", errors="replace")[:120]
+            except Exception:
+                detail = ""
+            return f"Pollinations no disponible ({e.code}). {detail}".strip()
+        except Exception as ex:
+            return f"Pollinations no disponible: {ex}"
 
     def _call(self, key: str, provider: str):
         """Despacha al método correcto según el proveedor."""
@@ -1224,6 +1443,9 @@ class _AIWorker(QThread):
     # ── Groq ──────────────────────────────────────────────────────────────────
     def _call_groq(self, key: str):
         """Retorna True si OK, o string de error si falla."""
+        blocked = _provider_blocked("groq")
+        if blocked:
+            return blocked            # bloqueo de red ya detectado: no gastar tiempo
         messages = [{"role": "system", "content": self._system}] + self._messages
         payload = json.dumps({
             "model"      : "llama-3.1-8b-instant",
@@ -1248,7 +1470,14 @@ class _AIWorker(QThread):
             try:    msg = json.loads(body).get("error", {}).get("message", body[:150])
             except: msg = body[:150]
             if e.code == 401: return "API Key de Groq inválida."
-            if e.code == 403: return "Groq bloqueado por la red (403)."
+            if e.code == 403:
+                # "Access denied. Please check your network settings." -> Groq
+                # rechaza la red/region (no la key). Se recuerda 30 min para no
+                # repetir la llamada en cada mensaje; se usa OpenRouter.
+                return _block_provider(
+                    "groq", 1800,
+                    "Groq bloqueado por la red (403: acceso denegado para esta "
+                    "conexión/región; prueba con otra red o VPN).")
             if e.code == 429:
                 import time as _time
                 _time.sleep(0.5)   # pausa mínima antes del fallback
@@ -1258,33 +1487,32 @@ class _AIWorker(QThread):
             return f"Groq no disponible: {ex}"
 
     # ── OpenRouter ────────────────────────────────────────────────────────────
+    MAX_OR_MODELS = 3   # máximo de modelos por pregunta (cada intento gasta cupo)
+
     def _call_openrouter(self, key: str):
         """
-        Llama a OpenRouter con fallback en cascada:
-        1) openrouter/free  (router automático de OpenRouter)
-        2) Modelos gratuitos conocidos y activos (marzo 2026)
-        Si uno retorna respuesta vacía o 404, pasa al siguiente.
+        Llama a OpenRouter con los modelos gratuitos VIGENTES (lista obtenida de
+        /api/v1/models y cacheada), probando como máximo MAX_OR_MODELS.
+        - 429 'free-models-per-day' es un cupo de la CUENTA: se detiene en el
+          acto (probar otro modelo solo gastaría más) y se recuerda hasta el
+          reinicio diario (00:00 UTC).
+        - 404/403 de un modelo concreto -> se descarta para la sesión.
         """
-        # Modelos ordenados por velocidad: los más rápidos primero
-        models = [
-            "openrouter/free",
-            "meta-llama/llama-4-scout:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "mistralai/mistral-small-3.1-24b-instruct:free",
-            "meta-llama/llama-4-maverick:free",
-            "deepseek/deepseek-chat-v3-0324:free",
-            "google/gemma-3-12b-it:free",
-            "deepseek/deepseek-r1:free",
-        ]
+        blocked = _provider_blocked("openrouter")
+        if blocked:
+            return blocked
         messages = [{"role": "system", "content": self._system}] + self._messages
         last_err  = "OpenRouter: ningún modelo respondió."
 
-        for model in models:
+        for model in _openrouter_models(key)[:self.MAX_OR_MODELS]:
             payload = json.dumps({
                 "model"      : model,
                 "messages"   : messages,
-                "max_tokens" : 900,    # reducido para respuestas más rápidas
+                "max_tokens" : 1200,
                 "temperature": 0.7,
+                # modelos con razonamiento: que no gasten el presupuesto
+                # pensando y devuelvan contenido vacío
+                "reasoning"  : {"effort": "low", "exclude": True},
             }).encode("utf-8")
             req = urllib.request.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -1298,34 +1526,43 @@ class _AIWorker(QThread):
                 },
                 method = "POST")
             try:
-                with urllib.request.urlopen(req, timeout=12, context=_ssl_ctx()) as resp:
+                with urllib.request.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
                     data    = json.loads(resp.read().decode("utf-8"))
-                    content = data["choices"][0]["message"]["content"]
-                    if content and content.strip():
+                    if data.get("error"):
+                        last_err = f"OpenRouter ({model}): {str(data['error'])[:80]}"
+                        continue
+                    content = (data["choices"][0]["message"].get("content") or "")
+                    if content.strip():
                         self.response_ready.emit(content.strip())
                         return True
-                    # Respuesta vacía → probar siguiente modelo
                     last_err = f"OpenRouter ({model}): respuesta vacía."
+                    _OR_STATE["dead"].add(model)
                     continue
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")
-                try:    msg = json.loads(body).get("error", {}).get("message", body[:120])
-                except: msg = body[:120]
+                try:    msg = json.loads(body).get("error", {}).get("message", body[:160])
+                except: msg = body[:160]
                 if e.code == 401:
                     return "API Key de OpenRouter inválida."
-                if e.code == 402:
-                    return "OpenRouter: límite diario alcanzado (50 req/día en plan gratuito)."
+                if e.code == 402 or "per-day" in msg or "credits" in msg.lower():
+                    return _block_provider(
+                        "openrouter", _seconds_to_utc_midnight(),
+                        "OpenRouter: se agotó el cupo gratuito diario de tu cuenta "
+                        "(50 solicitudes/día). Se restablece a las 00:00 UTC; con 10 "
+                        "créditos en openrouter.ai el cupo sube a 1000/día.")
                 if e.code == 429:
                     import time as _time
-                    _time.sleep(0.5)   # pausa mínima y pasar al siguiente modelo
-                    last_err = "OpenRouter: demasiadas solicitudes — probando otro modelo."
+                    _time.sleep(1.0)   # saturación momentánea de ese modelo
+                    last_err = f"OpenRouter ({model}): saturado, probando otro modelo."
                     continue
-                # 404 / 503 → modelo no disponible, probar el siguiente
+                if e.code in (403, 404):
+                    _OR_STATE["dead"].add(model)
                 last_err = f"OpenRouter ({model}): {msg[:80]}"
                 continue
             except Exception as ex:
                 last_err = f"OpenRouter no disponible: {ex}"
-                break   # error de red total — no seguir intentando
+                if "timed out" not in str(ex):
+                    break   # error de red total — no seguir intentando
 
         return last_err
 
@@ -1456,6 +1693,7 @@ class _TTSWorker(QThread):
     """
     error_occurred = Signal(str)
     finished_speaking = Signal()
+    playback_started = Signal()   # SAPI empezó a emitir audio (evento real del motor TTS)
 
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
@@ -1521,6 +1759,11 @@ class _TTSWorker(QThread):
                 return
             engine.setProperty("voice", voice_id)
             engine.setProperty("rate", 178)
+            try:
+                engine.connect("started-utterance",
+                               lambda name=None: self.playback_started.emit())
+            except Exception:
+                pass
             engine.say(self._text)
             engine.runAndWait()
             engine.stop()
@@ -1841,6 +2084,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
     # con el nombre EXACTO que el propio prompt le pide usar a la IA), no
     # una heurística de texto libre — evita cambios de método sorpresivos.
     inventory_model_suggested = Signal(str)
+    user_message_sent = Signal(str)   # el usuario escribió/habló (Opti deja de hablar)
+    close_requested = Signal()        # botón minimizar del encabezado
 
     # ─── Estilos ──────────────────────────────────────────────────────────────
     _QSS = """
@@ -1968,6 +2213,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._pending_explain: str = ""
         self._msg_queue: list = []
         self._welcome_shown: bool = False
+        self.opti_messages: list = []   # (parte, texto) publicados por Opti en el chat
         self._continuation_blocks: list = []   # bloques pendientes de respuesta larga
         # ── Reintentos silenciosos ────────────────────────────────────────────
         self._retry_count: int = 0
@@ -2023,7 +2269,29 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
     # ─── Construcción de UI ────────────────────────────────────────────────────
     def _build_ui(self):
-        root = QtWidgets.QVBoxLayout(self)
+        # Todo el contenido va en un área con desplazamiento: si la ventana es
+        # baja, el panel se desplaza en vez de cortar controles.
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setObjectName("aiScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff if _QT == "PyQt6" else Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea#aiScroll{background:transparent;border:none;}"
+            "QScrollArea#aiScroll > QWidget > QWidget#aiInner{background:transparent;}"
+            "QScrollBar:vertical{background:rgba(10,20,60,120);width:6px;border-radius:3px;}"
+            "QScrollBar::handle:vertical{background:rgba(60,120,220,180);border-radius:3px;"
+            "min-height:20px;}QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}")
+        self._scroll.viewport().setAutoFillBackground(False)
+        inner = QtWidgets.QWidget()
+        inner.setObjectName("aiInner")
+        inner.setMinimumHeight(640)      # por debajo de esto, desplazamiento en vez de recorte
+        self._scroll.setWidget(inner)
+        outer.addWidget(self._scroll)
+        root = QtWidgets.QVBoxLayout(inner)
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(5)
 
@@ -2031,13 +2299,35 @@ class AIAssistantPanel(QtWidgets.QWidget):
         hdr = QtWidgets.QHBoxLayout()
         ico = QtWidgets.QLabel("🤖")
         ico.setStyleSheet("font-size:18px; background:transparent;")
-        title = QtWidgets.QLabel("Asistente de IA")
+        title = QtWidgets.QLabel("Opti · Asistente de IA")
         title.setObjectName("aiTitle")
+        title.setToolTip("Opti, el asistente inteligente del Optimizador de Funciones")
         self.lbl_status = QtWidgets.QLabel("● Sin conexión")
         self.lbl_status.setObjectName("aiStatus")
+        # Indicador discreto: "Opti está pensando…" / "Opti está hablando…"
+        self.lbl_opti_state = QtWidgets.QLabel("")
+        self.lbl_opti_state.setStyleSheet(
+            "color:#3cff8a; font-size:10px; background:transparent;")
+        self._opti_anim = QTimer(self)
+        self._opti_anim.setInterval(450)
+        self._opti_anim_n = 0
+        self._opti_anim_base = ""
+        self._opti_anim.timeout.connect(self._tick_opti_state)
+        self.btn_minimize = QtWidgets.QPushButton("–")
+        self.btn_minimize.setObjectName("clearBtn")
+        self.btn_minimize.setFixedWidth(24)
+        self.btn_minimize.setToolTip("Minimizar el chat (los cálculos no se ven afectados)")
+        self.btn_minimize.clicked.connect(self.close_requested.emit)
+        # El encabezado nunca impone un ancho mayor al del panel
+        for _l in (title, self.lbl_status, self.lbl_opti_state):
+            _l.setWordWrap(True)
+            _l.setMinimumWidth(1)
+        self.lbl_opti_state.setMaximumWidth(110)
         hdr.addWidget(ico)
         hdr.addWidget(title, 1)
+        hdr.addWidget(self.lbl_opti_state)
         hdr.addWidget(self.lbl_status)
+        hdr.addWidget(self.btn_minimize)
         root.addLayout(hdr)
 
         # ── Sección API Key ──────────────────────────────────────────────────
@@ -2123,7 +2413,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self.chat_view.setMinimumHeight(120)
         self.chat_view.setMaximumHeight(220)
         self._append_system_msg(
-            "👋 Hola, soy tu Asistente de IA para el Optimizador.\n\n"
+            "👋 Hola, soy Opti, tu asistente inteligente de optimización.\n\n"
             "Necesito al menos una API Key gratuita:\n"
             "  🥇 Groq → console.groq.com/keys  (gsk_...)\n"
             "  🥈 OpenRouter → openrouter.ai → Keys  (sk-or-...)\n\n"
@@ -2131,7 +2421,18 @@ class AIAssistantPanel(QtWidgets.QWidget):
             "  • Recomendar métodos · Explicar resultados\n"
             "  • Comparar métodos · Diagnosticar convergencia\n\n"
             "Escríbeme o usa las sugerencias de abajo 👇")
-        root.addWidget(self.chat_view, 1)
+        # Área de mensajes: el recuadro de resultado del motor (si se adjunta con
+        # attach_result_widget) queda arriba de la conversación, en un divisor
+        # ajustable, para que resultado y explicación de Opti se lean juntos.
+        self._chat_split = QtWidgets.QSplitter(
+            Qt.Orientation.Vertical if _QT == "PyQt6" else Qt.Vertical)
+        self._chat_split.setChildrenCollapsible(False)
+        self._chat_split.setHandleWidth(5)
+        self._chat_split.setStyleSheet(
+            "QSplitter::handle { background: rgba(60,100,200,120); border-radius:2px; }")
+        self._chat_split.addWidget(self.chat_view)
+        self._result_host = None
+        root.addWidget(self._chat_split, 1)
 
         # ── Botón "Continuar" para respuestas largas ──────────────────────────
         self.btn_continue = QtWidgets.QPushButton("▼  La respuesta continúa — clic para ver más")
@@ -2163,6 +2464,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
             Qt.CursorShape.PointingHandCursor if _QT=="PyQt6" else Qt.PointingHandCursor))
         self.btn_explain.clicked.connect(self._on_explain_click)
         self.btn_explain.setEnabled(False)
+        self.btn_explain.setMinimumWidth(1)   # un nombre de función largo no ensancha el panel
         root.addWidget(self.btn_explain)
 
         # ── Sugerencias rápidas ───────────────────────────────────────────────
@@ -2350,6 +2652,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
         self._apply_keys(key, key_b, source="manual")
 
     def _apply_keys(self, key: str, key_backup: str = "", source: str = "manual"):
+        if source == "manual":
+            reset_provider_blocks()     # key nueva: volver a probar los proveedores
         self._api_key        = key
         self._api_key_backup = key_backup
         self.btn_send.setEnabled(True)
@@ -2641,6 +2945,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
         if not self._api_key:
             self._append_system_msg("⚠️ Conecta tu API Key primero.")
             return
+        if not is_auto:
+            self.user_message_sent.emit(text)
         if self._response_mode is None and not is_auto:
             self._pending_first_message = text
             self._ask_response_mode()
@@ -2681,12 +2987,11 @@ class AIAssistantPanel(QtWidgets.QWidget):
         # Inventario (el system prompt le pide usar el nombre EXACTO del
         # combo), avisa a main_window para que lo active — coincidencia
         # determinista de texto, no heurística de intención libre.
+        # También cubre los métodos del catálogo (Estadística, IO, etc.).
         try:
-            from app.domain.inventory import INVENTORY_METHOD_LABELS
-            for label in INVENTORY_METHOD_LABELS:
-                if label in text:
-                    self.inventory_model_suggested.emit(label)
-                    break
+            label = detect_method_label(text)
+            if label:
+                self.inventory_model_suggested.emit(label)
         except Exception:
             pass
         if len(self._messages) > 20:
@@ -2713,7 +3018,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
         fmt_name.setFontWeight(
             QtGui.QFont.Weight.Bold if _QT=="PyQt6" else QtGui.QFont.Bold)
         fmt_name.setFontPointSize(11)
-        cursor.insertText("\n🤖 Asistente\n", fmt_name)
+        cursor.insertText("\n🤖 Opti\n", fmt_name)
         self.chat_view.setTextCursor(cursor)
         self.chat_view.ensureCursorVisible()
 
@@ -2850,7 +3155,8 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
     def _on_provider_used(self, provider: str):
         """Actualiza el tooltip del status si respondió el proveedor de respaldo."""
-        names = {"groq": "Groq", "openrouter": "OpenRouter"}
+        names = {"groq": "Groq", "openrouter": "OpenRouter",
+                 "pollinations": "Pollinations (respaldo sin key)"}
         self.lbl_status.setToolTip(f"Último en responder: {names.get(provider, provider)}")
 
     def _on_error(self, error: str):
@@ -2869,6 +3175,19 @@ class AIAssistantPanel(QtWidgets.QWidget):
             self.btn_send.setText("➤")
             self._retry_count = 0
             self._msg_queue.clear()
+            return
+
+        # Cupo diario agotado / red bloqueada: reintentar no sirve y gasta cupo
+        if is_quota_or_block_error(error):
+            self._remove_last_system_msg()
+            if self._messages and self._messages[-1]["role"] == "user":
+                self._messages.pop()
+            self._busy = False
+            self._retry_count = 0
+            self.btn_send.setEnabled(bool(self._api_key))
+            self.btn_send.setText("➤")
+            self._msg_queue.clear()
+            self._append_ai_msg("⚠️ " + error)
             return
 
         # Cualquier otro error: reintentar en silencio con delay corto
@@ -2967,7 +3286,10 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
         # Si hay key y datos de un cálculo, activar botón con prompt genérico
         # (fallback por si explain_calculation no fue llamado por la app principal)
-        if self._api_key and metodo and fx and not self._pending_explain:
+        # (se renueva si cambió el método o la función: nunca un botón de un cálculo anterior)
+        if self._api_key and metodo and fx and (
+                not self._pending_explain or getattr(self, "_pending_for", None) != (metodo, fx)):
+            self._pending_for = (metodo, fx)
             self._pending_explain = (
                 f"Se ejecutó el método **{metodo}** sobre f = {fx}.\n"
                 f"{self._context}\n\n"
@@ -3064,6 +3386,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
 
         # Guardar prompt y activar botón — sin consumir API hasta que el usuario lo pida
         self._pending_explain = prompt
+        self._pending_for = (metodo, fx)
         self.btn_explain.setText(f"📊 Explicar: {metodo}  f={fx[:22]}{'…' if len(fx)>22 else ''}")
         self.btn_explain.setEnabled(True)
 
@@ -3101,7 +3424,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
         fmt_name.setFontWeight(
             QtGui.QFont.Weight.Bold if _QT=="PyQt6" else QtGui.QFont.Bold)
         fmt_name.setFontPointSize(11)
-        cursor.insertText("\n🤖 Asistente\n", fmt_name)
+        cursor.insertText("\n🤖 Opti\n", fmt_name)
         blank = QtGui.QTextCharFormat()
         for raw in text.split('\n'):
             html = (
@@ -3113,6 +3436,80 @@ class AIAssistantPanel(QtWidgets.QWidget):
             cursor.insertText('\n', blank)
         self.chat_view.setTextCursor(cursor)
         self.chat_view.ensureCursorVisible()
+
+    # ─── Opti: mensajes de la intervención automática ────────────────────────
+    def attach_result_widget(self, widget):
+        """Coloca el recuadro de resultado del dashboard dentro del área de
+        mensajes del chat (única instancia: deja de estar en el dashboard)."""
+        host = QtWidgets.QScrollArea()
+        host.setObjectName("resultHost")
+        host.setWidgetResizable(True)
+        host.setFrameShape(QtWidgets.QFrame.NoFrame)
+        host.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff if _QT == "PyQt6" else Qt.ScrollBarAlwaysOff)
+        host.setStyleSheet("QScrollArea#resultHost{background:transparent;border:none;}"
+                           "QScrollArea#resultHost > QWidget > QWidget{background:transparent;}")
+        host.setMinimumHeight(90)
+        host.setMinimumWidth(0)
+        widget.setMinimumWidth(0)
+        host.setWidget(widget)
+        host.setVisible(False)
+        self._chat_split.insertWidget(0, host)
+        self._chat_split.setSizes([230, 220])
+        # El chat ya no necesita el tope de altura: comparte el espacio con el recuadro
+        self.chat_view.setMaximumHeight(16777215)
+        self._result_host = host
+        return host
+
+    def set_result_visible(self, visible: bool):
+        if self._result_host is not None:
+            was_hidden = self._result_host.isHidden()
+            self._result_host.setVisible(visible)
+            sz = self._chat_split.sizes()
+            if visible and was_hidden and len(sz) == 2 and sum(sz) > 0 and sz[0] < 180:
+                # El recuadro recibe algo más de la mitad del área de mensajes
+                total = sum(sz)
+                self._chat_split.setSizes([int(total * 0.55), total - int(total * 0.55)])
+
+    def set_opti_state(self, text: str):
+        """'' oculta el indicador; con texto lo muestra con puntos animados."""
+        self._opti_anim_base = text
+        self._opti_anim_n = 0
+        if text:
+            self.lbl_opti_state.setText(text)
+            self._opti_anim.start()
+        else:
+            self._opti_anim.stop()
+            self.lbl_opti_state.setText("")
+
+    def _tick_opti_state(self):
+        self._opti_anim_n = (self._opti_anim_n + 1) % 4
+        self.lbl_opti_state.setText(self._opti_anim_base + "." * self._opti_anim_n)
+
+    def post_opti_message(self, part: str, text: str, context: str = ""):
+        """Publica en el chat un mensaje de la intervención automática.
+        part: 'greeting' | 'thinking' | 'explanation'. La explicación se añade
+        al historial (precedida de los datos del evento) para que las preguntas
+        siguientes del usuario tengan contexto."""
+        if part == "thinking":
+            self.set_opti_state("💭 Opti está analizando")
+            return
+        if not text:
+            return
+        if self._welcome_shown:
+            self.chat_view.clear()
+            self._welcome_shown = False
+        self._append_ai_msg(text)
+        self.opti_messages.append((part, text))
+        if part == "explanation":
+            self.set_opti_state("")
+            if context:
+                self._messages.append({"role": "user", "content":
+                    "[Evento detectado automáticamente por el optimizador; no lo escribió "
+                    "el usuario]\n" + context})
+            self._messages.append({"role": "assistant", "content": text})
+            if len(self._messages) > 20:
+                self._messages = self._messages[-20:]
 
     def _append_system_msg(self, text: str):
         cursor = self.chat_view.textCursor()
@@ -3481,7 +3878,7 @@ class AIAssistantPanel(QtWidgets.QWidget):
                     continue
 
                 is_user   = (role == "user")
-                label_txt = "👤  Tú" if is_user else "🤖  Asistente"
+                label_txt = "👤  Tú" if is_user else "🤖  Opti"
                 label_sty = sty_label_user if is_user else sty_label_ai
 
                 label_para    = Paragraph(label_txt, label_sty)

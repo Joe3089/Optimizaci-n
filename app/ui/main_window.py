@@ -9,7 +9,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
-import csv, importlib, math, os, sys, tempfile, traceback
+import csv, importlib, math, os, re, sys, tempfile, traceback
 from typing import Any, Dict, List, Optional
 
 # ── PyInstaller: agregar _MEIPASS a sys.path ANTES de cualquier import dinámico ──
@@ -178,6 +178,15 @@ from app.ui.inventory_panel import (
     InventoryPanel, INVENTORY_METHOD_LABELS, INVENTORY_LABEL_TO_KEY,
 )
 
+# ── Secciones y métodos que no parten de una función f(x) ─────────────────────
+from app.application.problem_catalog import (
+    SECTIONS, SECTION_OR, SECTION_OPT, groups_for, is_problem_method,
+    solve as solve_problem, describe_input, style_figure,
+)
+from app.ui.problem_panel import ProblemPanel
+from app.application.problem_catalog import SPEC_BY_LABEL as _SPEC_BY_LABEL
+from app.ui import dashboard_views as _dv
+
 # ── Métodos ───────────────────────────────────────────────────────────────────
 METHODS_1D = ["Búsqueda Local", "Fibonacci", "Armijo", "Wolfe"]
 METHODS_MD = [
@@ -273,8 +282,28 @@ GROUPED_METHODS = [
         "MO — Peso Adaptativo",
         "MO — Punto de Referencia",
     ]),
-    ("Inventario", list(INVENTORY_METHOD_LABELS)),
 ]
+
+
+def _sectioned_groups(section: str):
+    """Grupos del combo de métodos para una sección del panel de control."""
+    groups = groups_for(section)
+    if section == SECTION_OPT:
+        return GROUPED_METHODS + groups
+    if section == SECTION_OR:
+        # El inventario reúne los 4 modelos existentes y la carga de archivos.
+        out = []
+        for name, methods in groups:
+            out.append((name, list(INVENTORY_METHOD_LABELS) + methods if name == "Inventario" else methods))
+        return out
+    return groups
+
+
+def _section_of(method: str) -> Optional[str]:
+    for section in SECTIONS:
+        if any(method in methods for _, methods in _sectioned_groups(section)):
+            return section
+    return None
 
 # Rol interno para marcar items de encabezado de categoría en el ComboBox
 _CMB_HEADER_ROLE = (Qt.ItemDataRole.UserRole + 10
@@ -319,13 +348,15 @@ class _GroupHeaderDelegate(QtWidgets.QStyledItemDelegate):
         return sh
 
 
-def _populate_grouped_combo(cmb: "QCmb") -> None:
-    """Pobla el QComboBox con métodos agrupados por categoría.
+def _populate_grouped_combo(cmb: "QCmb", section: str = SECTION_OPT) -> None:
+    """Pobla el QComboBox con los métodos de una sección, agrupados por categoría.
     Los encabezados son visualmente distintos y no seleccionables."""
-    cmb.setItemDelegate(_GroupHeaderDelegate(cmb))
+    if not isinstance(cmb.itemDelegate(), _GroupHeaderDelegate):
+        cmb.setItemDelegate(_GroupHeaderDelegate(cmb))
+    cmb.clear()
     cmb.addItem("")                    # ítem vacío inicial (placeholder)
 
-    for category, methods in GROUPED_METHODS:
+    for category, methods in _sectioned_groups(section):
         # ── Encabezado de categoría ──────────────────────────────────────────
         cmb.addItem(category)
         hdr_idx = cmb.count() - 1
@@ -1064,6 +1095,7 @@ from app.application.report_content import (
     make_grid as _grid,
 )
 from app.application.optimization_service import run_method as _run_method
+from app.application import result_analysis as _ra
 
 # ── Exportaciones (carga LAZY) ────────────────────────────────────────────────
 # reportlab/openpyxl/python-docx suman ~2.2s de import solo entre los tres —
@@ -1201,7 +1233,7 @@ class InterfazOptimizacion(QMW):
         # podía expandir/contraer). Mismo patrón y estilo de "manija" que ya
         # usa el splitter vertical del Dashboard (tabla/2D/3D) más abajo.
         root = QSplit(Qt.Orientation.Horizontal if _QT=="PyQt6" else Qt.Horizontal)
-        root.setChildrenCollapsible(True)
+        root.setChildrenCollapsible(False)   # ningún panel se puede aplastar hasta cortarse
         root.setHandleWidth(6)
         root.setStyleSheet(
             "QSplitter::handle { background: rgba(60,100,200,160); }"
@@ -1245,6 +1277,7 @@ class InterfazOptimizacion(QMW):
         self._RL = QVBox(self.right)
         self._RL.setContentsMargins(16,14,16,14); self._RL.setSpacing(10)
 
+        self.right.setMinimumWidth(460)
         root.addWidget(self.left)
         root.addWidget(self.right)
         root.setStretchFactor(0, 0)
@@ -1257,11 +1290,21 @@ class InterfazOptimizacion(QMW):
             try:
                 self.ai_panel = AICls(central)
                 self.ai_panel.setVisible(False)
+                self.ai_panel.setMinimumWidth(300)
                 root.addWidget(self.ai_panel)
                 root.setStretchFactor(2, 0)
             except Exception as _ai_err:
                 print(f"[AI] No se pudo inicializar el panel: {_ai_err}")
                 self.ai_panel = None
+
+        # ── Intervención automática de la IA (resultado/error → texto + voz) ──
+        self.intervention = None
+        try:
+            from app.infrastructure.auto_intervention import AutoInterventionController
+            self.intervention = AutoInterventionController(self.ai_panel, self)
+            self._wire_opti()
+        except Exception as _iv_err:
+            print(f"[IA auto] No se pudo inicializar: {_iv_err}")
 
         # Tamaño inicial equivalente al ancho fijo que tenía antes (375px)
         # — a partir de aquí el usuario puede arrastrar cada manija para
@@ -1281,9 +1324,21 @@ class InterfazOptimizacion(QMW):
         t = QLbl("Panel de control"); t.setObjectName("panelTitle")
         L.addWidget(t); L.addWidget(self._hl())
 
-        # 1 — Método (primero)
+        # 0 — Sección: filtra los métodos disponibles en el combo siguiente
+        L.addWidget(QLbl("Sección:"))
+        self.cmb_sec = QCmb()
+        self.cmb_sec.addItems(SECTIONS)
+        self.cmb_sec.setCurrentText(SECTION_OPT)
+        self.cmb_sec.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            if _QT == "PyQt6" else QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb_sec.setMinimumContentsLength(12)
+        L.addWidget(self.cmb_sec); L.addSpacing(3)
+
+        # 1 — Método
         L.addWidget(QLbl("Método:"))
         self.cmb = QCmb()
+        self.cmb.setMaxVisibleItems(30)   # que se vean todos los métodos de la sección
         _populate_grouped_combo(self.cmb)
         # Sin esto, el ancho MÍNIMO del combo se calcula para mostrar la
         # entrada más larga (p.ej. "Inventario: Punto de Reorden (ROP)")
@@ -1296,6 +1351,18 @@ class InterfazOptimizacion(QMW):
         self.cmb.setSizeAdjustPolicy(_sap)
         self.cmb.setMinimumContentsLength(12)
         L.addWidget(self.cmb); L.addSpacing(3)
+
+        # 1b — Datos del usuario para los métodos con f(x): cargar archivo / usar ejemplo
+        from app.ui.problem_panel import data_buttons
+        self.row_fdata = QW(); _fd = QVBox(self.row_fdata); _fd.setContentsMargins(0, 0, 0, 0)
+        _fbar = data_buttons(self.row_fdata)
+        self.btn_f_load, self.btn_f_example = _fbar.buttons
+        _fd.addLayout(_fbar)
+        self.lbl_f_file = QLbl(""); self.lbl_f_file.setWordWrap(True)
+        self.lbl_f_file.setStyleSheet("color:#3cff8a;font-size:10px;")
+        self.lbl_f_file.setVisible(False)
+        _fd.addWidget(self.lbl_f_file)
+        L.addWidget(self.row_fdata)
 
         # 2 — Función
         self.lbl_fx_title = QLbl("Función f(x):")
@@ -1366,7 +1433,13 @@ class InterfazOptimizacion(QMW):
         # 5b — Módulo de Inventario (oculto hasta elegir un método "Inventario: …")
         self.inv_panel = InventoryPanel()
         self.inv_panel.built.connect(self._on_inventory_built)
+        self.inv_panel.export_requested.connect(self._exp_menu)
         L.addWidget(self.inv_panel)
+
+        # 5c — Formulario de los métodos del catálogo (Estadística, IO, etc.)
+        self.prob_panel = ProblemPanel()
+        self.prob_panel.export_requested.connect(self._exp_menu)
+        L.addWidget(self.prob_panel)
 
         # 6 — Botones (en recuadro con borde rojo-acento)
         L.addSpacing(8)
@@ -1433,6 +1506,12 @@ class InterfazOptimizacion(QMW):
             " border:1px solid #3cff8a; }")
         self.btn_ai.setCheckable(True)
         L.addWidget(self.btn_ai)
+        self.btn_diag = QBtn("🩺  Diagnóstico IA y voz")
+        self.btn_diag.setToolTip("Ejecuta la prueba de la intervención automática "
+                                 "(simulada o real) sin abrir la terminal")
+        self.btn_diag.setStyleSheet("QPushButton{font-size:11px;min-height:24px;}")
+        self.btn_diag.clicked.connect(self._open_diagnostic)
+        L.addWidget(self.btn_diag)
 
         # Botón Historial
         L.addSpacing(4)
@@ -1467,9 +1546,30 @@ class InterfazOptimizacion(QMW):
         R = self._RL
         t = QLbl("Dashboard"); t.setObjectName("dashTitle"); R.addWidget(t)
 
+        # Recuadro de resultado/error + explicación de la IA (oculto hasta el 1er cálculo)
+        self.result_box = None
+        if self.intervention is not None:
+            from app.ui.result_box import ResultBox
+            self.result_box = ResultBox(self.intervention, self.right)
+            if self.ai_panel is not None and hasattr(self.ai_panel, "attach_result_widget"):
+                # Corrección 1: única instancia, dentro del área de mensajes del chat
+                self.ai_panel.attach_result_widget(self.result_box)
+                self.result_box.set_chat_hosted(True)
+            else:
+                R.addWidget(self.result_box)
+
+        # Estado del dashboard: qué método muestran la tabla y las gráficas
+        self.lbl_dash = QLbl("Selecciona un método y pulsa Calcular.")
+        self.lbl_dash.setObjectName("dashState")
+        self.lbl_dash.setWordWrap(True)
+        self.lbl_dash.setStyleSheet(
+            "color:#cfe3ff;font-size:12px;padding:4px 8px;background:rgba(8,20,55,190);"
+            "border:1px solid #1e3a78;border-radius:5px;")
+        R.addWidget(self.lbl_dash)
+
         # ── Splitter principal vertical: tabla / 2D / 3D ─────────────────────
         main_sp = QSplit(Qt.Orientation.Vertical if _QT=="PyQt6" else Qt.Vertical)
-        main_sp.setChildrenCollapsible(True)
+        main_sp.setChildrenCollapsible(False)
         main_sp.setHandleWidth(6)
         main_sp.setStyleSheet(
             "QSplitter::handle { background: rgba(60,100,200,160); border-radius:3px; }"
@@ -1489,14 +1589,20 @@ class InterfazOptimizacion(QMW):
         self.frame_2d = QFrame(); self.frame_2d.setObjectName("frame2d")
         f2l = QVBox(self.frame_2d); f2l.setContentsMargins(4,4,4,4)
         self.lbl_2d = QLbl("Ejecute un método para ver la gráfica 2D.")
-        self.lbl_2d.setAlignment(_AL("AlignCenter")); f2l.addWidget(self.lbl_2d)
+        self.lbl_2d.setAlignment(_AL("AlignCenter")); self.lbl_2d.setWordWrap(True)
+        f2l.addWidget(self.lbl_2d)
 
         # -- Frame 3D --
         self.frame_3d = QFrame(); self.frame_3d.setObjectName("frame3d")
         f3l = QVBox(self.frame_3d); f3l.setContentsMargins(4,4,4,4)
         self.lbl_3d = QLbl("Ejecute un método para ver la gráfica 3D.")
-        self.lbl_3d.setAlignment(_AL("AlignCenter")); f3l.addWidget(self.lbl_3d)
+        self.lbl_3d.setAlignment(_AL("AlignCenter")); self.lbl_3d.setWordWrap(True)
+        f3l.addWidget(self.lbl_3d)
 
+        # Alturas mínimas: tabla, 2D y 3D siempre legibles al mover los divisores
+        tbl_wrap.setMinimumHeight(110)
+        self.frame_2d.setMinimumHeight(170)
+        self.frame_3d.setMinimumHeight(170)
         main_sp.addWidget(tbl_wrap)
         main_sp.addWidget(self.frame_2d)
         main_sp.addWidget(self.frame_3d)
@@ -1530,8 +1636,23 @@ class InterfazOptimizacion(QMW):
         self.btn_exit.clicked.connect(self.salir)
         self.btn_export.clicked.connect(self._exp_menu)
         self.cmb.currentTextChanged.connect(self._on_method)
+        # Corrección 2: el dashboard sigue siempre al método seleccionado
+        self._calc_gen = 0
+        self._shown_method = ""
+        self._auto_running = False
+        self._plot_data = {}
+        self._auto_timer = QtCore.QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setInterval(350)   # agrupa cambios rápidos (teclado/rueda)
+        self._auto_timer.timeout.connect(self._auto_run)
+        self.cmb.currentTextChanged.connect(self._method_switched)
+        if self.intervention is not None:
+            self.intervention.event_presented.connect(self._on_result_presented)
+        self.cmb_sec.currentTextChanged.connect(self._on_section)
         self.btn_ai.toggled.connect(self._toggle_ai_panel)
         self.btn_hist.clicked.connect(self._show_historial)
+        self.btn_f_load.clicked.connect(self._f_load_dialog)
+        self.btn_f_example.clicked.connect(self.f_load_example)
         if self.ai_panel:
             self.ai_panel.inventory_model_suggested.connect(self._on_ai_inventory_suggested)
 
@@ -1541,24 +1662,51 @@ class InterfazOptimizacion(QMW):
         Inventario en su respuesta — activa ese método en el combo
         automáticamente (mismo efecto que si el usuario lo eligiera a mano).
         """
+        if self.cmb.currentText() != label:
+            self.select_method(label)
+
+    def _on_section(self, section: str):
+        self.cmb.blockSignals(True)
+        _populate_grouped_combo(self.cmb, section)
+        self.cmb.blockSignals(False)
+        self._on_method()
+        self._method_switched()
+
+    def select_method(self, label: str) -> bool:
+        """Activa un método de cualquier sección, cambiando de sección si hace falta."""
+        section = _section_of(label)
+        if section and self.cmb_sec.currentText() != section:
+            self.cmb_sec.setCurrentText(section)
         idx = self.cmb.findText(label)
-        if idx >= 0 and self.cmb.currentText() != label:
+        if idx >= 0:
             self.cmb.setCurrentIndex(idx)
+        return idx >= 0
 
     def _toggle_ai_panel(self, checked: bool):
         """Muestra u oculta el panel del asistente de IA."""
         if self.ai_panel:
             self.ai_panel.setVisible(checked)
+            # El panel arranca con ancho 0 en el divisor: al abrirlo se le da
+            # espacio real (ahí viven el chat y el recuadro de resultado).
+            sp = self.ai_panel.parentWidget()
+            if checked and isinstance(sp, QtWidgets.QSplitter):
+                i, sz = sp.indexOf(self.ai_panel), sp.sizes()
+                if 0 <= i < len(sz) and sz[i] < 200:
+                    big = max((j for j in range(len(sz)) if j != i), key=lambda j: sz[j])
+                    sz[big] = max(300, sz[big] - (340 - sz[i]))
+                    sz[i] = 340
+                    sp.setSizes(sz)
             # Si se abre el panel Y ya hay un cálculo previo → explicarlo
             if checked and self._hist and self._metodo:
-                self._update_ai_context()
+                # Si lo abrió Opti, la explicación ya está en camino: no duplicarla
+                self._update_ai_context(explain=not getattr(self, "_opti_auto_open", False))
         elif checked:
             self.btn_ai.setChecked(False)
             QMsgBox.information(self, "Asistente de IA",
                 "El módulo 'ai_assistant.py' no se encontró en la carpeta del proyecto.\n"
                 "Asegúrate de colocar ai_assistant.py junto a interfaz_qt.py.")
 
-    def _update_ai_context(self):
+    def _update_ai_context(self, explain: bool = True):
         """
         Actualiza el contexto del asistente y dispara la explicación
         automática del cálculo recién ejecutado.
@@ -1598,7 +1746,7 @@ class InterfazOptimizacion(QMW):
                 self.ai_panel.update_session_methods(self._session_methods)
 
             # 3. Si el panel está visible Y hay API Key → explicación automática
-            if self.ai_panel.isVisible() and self.ai_panel._api_key:
+            if explain and self.ai_panel.isVisible() and self.ai_panel._api_key:
                 self.ai_panel.explain_calculation(
                     metodo = self._metodo,
                     fx     = self._fx,
@@ -1652,9 +1800,226 @@ class InterfazOptimizacion(QMW):
         self.inv_panel.setVisible(is_inv)
         if is_inv:
             self.inv_panel.set_model(INVENTORY_LABEL_TO_KEY.get(m))
-        self.lbl_fx_title.setVisible(not is_inv)
-        self.edt_fx.setVisible(not is_inv)
-        self.row_range.setVisible(not is_inv)
+        is_prob = is_problem_method(m)
+        self.prob_panel.setVisible(is_prob)
+        if is_prob:
+            self.prob_panel.set_method(m)
+        uses_function = not (is_inv or is_prob)
+        self.lbl_fx_title.setVisible(uses_function)
+        self.edt_fx.setVisible(uses_function)
+        self.row_range.setVisible(uses_function)
+        self.row_fdata.setVisible(uses_function)
+        if not uses_function:
+            self.lbl_f_file.setVisible(False)
+
+    # ── Datos del usuario en los métodos con f(x) ──────────────────────────
+    _F_KEYS = {
+        "fx": ("f", "fx", "funcion", "funcionobjetivo", "objetivo", "funcionfx"),
+        "gx": ("g", "gx", "restriccion", "restricciones", "restriccionesgx", "restricciongx"),
+        "vars": ("variables", "vars", "var"),
+        "x0": ("x0", "puntoinicial", "inicial", "puntoinicialx0", "x0inicial"),
+        "lo": ("min", "minimo", "a", "lo", "limiteinferior", "inferior", "xmin"),
+        "hi": ("max", "maximo", "b", "hi", "limitesuperior", "superior", "xmax"),
+        "rango": ("rango", "intervalo", "rangodebusqueda", "intervalodebusqueda"),
+        "tol": ("tolerancia", "tol", "l", "tolerancial"),
+        "alpha": ("alfa", "alpha", "peso", "pesoalfa"),
+        "metodo": ("metodo", "metododeoptimizacion"),
+    }
+
+    def _f_example(self, m: str) -> dict:
+        if m in METHODS_MD:
+            return dict(fx="(x1-2)**2 + (x2-1)**2", gx="x1+x2-2", vars="x1 x2",
+                        x0="0, 0", lo=0.0, hi=5.0)
+        if m in METHODS_MULTIOBJ:
+            return dict(fx="(x-3)**2", gx="", vars="", x0="1.0", lo=0.0, hi=5.0)
+        if m == "Grad. Conjugado":
+            return dict(fx="(x1-1)**2 + (x2-2)**2", gx="", vars="x1 x2", x0="0, 0",
+                        lo=-1.0, hi=4.0)
+        return dict(fx="x**2 - 4*x + 5", gx="", vars="", x0="1.0", lo=0.0, hi=5.0)
+
+    def f_load_example(self):
+        m = self.cmb.currentText().strip()
+        ex = self._f_example(m)
+        self.edt_fx.setText(ex["fx"]); self.edt_gx.setText(ex["gx"])
+        self.edt_vars.setText(ex["vars"]); self.edt_x0.setText(ex["x0"])
+        self.smin.setValue(ex["lo"]); self.smax.setValue(ex["hi"])
+        self.edt_tol.setText("0.1")
+        self.lbl_f_file.setText("📋 Ejemplo cargado: reemplázalo por tu función si quieres.")
+        self.lbl_f_file.setVisible(True)
+
+    def f_clear(self):
+        for w in (self.edt_fx, self.edt_gx, self.edt_vars, self.edt_x0):
+            w.clear()
+        self.edt_tol.setText("0.1")
+        self.smin.setValue(0.0); self.smax.setValue(5.0)
+        self.lbl_f_file.setVisible(False)
+        self._invalidate_dashboard()
+        self.lbl_dash.setText("Datos vaciados: escribe tu función o carga un archivo y pulsa Calcular.")
+
+    def _f_load_dialog(self):
+        from app.infrastructure import data_import as di
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Selecciona tu función o problema", "", di.FILE_FILTER)
+        if path:
+            try:
+                self.f_load_file(path)
+            except ValueError as ex:
+                QMsgBox.warning(self, "Cargar archivo", str(ex))
+
+    def f_load_file(self, path: str, exercise: Optional[int] = None) -> list:
+        """Vuelca f(x), g(x), variables, x0, rango, tolerancia (y opcionalmente el
+        método) desde CSV/Excel/Word/PDF. Solo copia texto a los campos: nada se
+        evalúa aquí (lo valida el parser seguro al calcular)."""
+        from app.infrastructure import data_import as di
+        from app.ui.exercise_dialog import choose_exercise
+        _r = di.resolve_exercise(path, exercise,
+                                 lambda exs, name: choose_exercise(self, exs, name))
+        if _r is None:
+            return []                    # el usuario canceló la selección del ejercicio
+        path, shown = _r
+        pairs = di.read_pairs(path)
+        got = {}
+        for field, keys in self._F_KEYS.items():
+            v = next((pairs[k] for k in keys if k in pairs), None)
+            if v is not None:
+                got[field] = v.strip()
+        if not got:
+            lines = [ln.strip() for ln in di.read_text_lines(path) if ln.strip()]
+            if len(lines) == 1:
+                got["fx"] = lines[0]            # el archivo es solo la función
+        if not got:
+            raise ValueError("No se reconoció la función en el archivo. Escribe una línea "
+                             "«campo: valor» por dato, por ejemplo «f(x): x**2 - 4*x + 5», "
+                             "«x0: 1», «rango: 0, 5», «g(x): x1+x2-2», «tolerancia: 0.1».")
+
+        def num(txt, name):
+            t = txt.strip().replace(",", ".") if txt.count(",") == 1 and "." not in txt \
+                else txt.strip()
+            if not di.is_number(t):
+                raise ValueError(f"«{name}» debe ser numérico (se leyó «{txt}»).")
+            return float(t)
+
+        if "metodo" in got:
+            label = next((mm for mm in ALL_METHODS if di.norm_key(mm) == di.norm_key(got["metodo"])),
+                         None)
+            if label:
+                self.select_method(label)
+        if "rango" in got:
+            parts = [x for x in re.split(r"[;,\s\[\]()]+", got["rango"]) if x]
+            if len(parts) != 2:
+                raise ValueError(f"El rango debe tener dos números «a, b» (se leyó «{got['rango']}»).")
+            got["lo"], got["hi"] = parts
+        lo = num(got["lo"], "mínimo") if "lo" in got else None
+        hi = num(got["hi"], "máximo") if "hi" in got else None
+        if "fx" in got: self.edt_fx.setText(got["fx"])
+        if "gx" in got: self.edt_gx.setText(got["gx"])
+        if "vars" in got: self.edt_vars.setText(got["vars"].replace(",", " "))
+        if "x0" in got: self.edt_x0.setText(got["x0"])
+        if "tol" in got: self.edt_tol.setText(str(num(got["tol"], "tolerancia")))
+        if "alpha" in got: self.edt_alpha.setValue(num(got["alpha"], "alfa"))
+        if lo is not None: self.smin.setValue(lo)
+        if hi is not None: self.smax.setValue(hi)
+        names = {"fx": "f(x)", "gx": "g(x)", "vars": "variables", "x0": "x0", "lo": "mínimo",
+                 "hi": "máximo", "rango": "rango", "tol": "tolerancia", "alpha": "α",
+                 "metodo": "método"}
+        self.lbl_f_file.setText(f"📂 Cargado: {shown} → "
+                                + ", ".join(names[k] for k in got))
+        self.lbl_f_file.setVisible(True)
+        return list(got)
+
+    # ── Sincronización método seleccionado ↔ dashboard (Corrección 2) ──────
+    def _method_switched(self, *_):
+        """Al elegir otro método se descartan de inmediato la tabla, las gráficas
+        y el recuadro del método anterior, y se recalcula con los datos actuales."""
+        m = self.cmb.currentText().strip()
+        if not m or m == self._shown_method:
+            return
+        self._invalidate_dashboard()
+        reason = self._auto_run_blocker(m)
+        if reason:
+            self.lbl_dash.setText(f"Método seleccionado: {m} — {reason}")
+            for lbl in (self.lbl_2d, self.lbl_3d):
+                lbl.setText(f"Sin resultados de «{m}» todavía: {reason}")
+        else:
+            self.lbl_dash.setText(f"⏳ Método seleccionado: {m} — calculando con la función "
+                                  "y los parámetros actuales…")
+            self._auto_timer.start()
+
+    def _invalidate_dashboard(self):
+        self._calc_gen += 1          # cualquier cálculo en curso queda obsoleto
+        self._auto_timer.stop()
+        self._shown_method = ""
+        self._hist = []
+        self._plot_data = {}
+        self._reset()
+        self._set_result_visible(False)
+        ctrl = getattr(self, "intervention", None)
+        if ctrl is not None and ctrl.current_event is not None:
+            try: ctrl.stop()     # la voz hablaba del método anterior
+            except Exception: pass
+
+    def _auto_run_blocker(self, m: str) -> str:
+        """Motivo por el que no se puede recalcular solo ("" si se puede)."""
+        if is_problem_method(m):
+            if not self.prob_panel.has_user_data():
+                return ("ingresa tus datos (escríbelos, usa «📂 Cargar archivo» o "
+                        "«📋 Usar ejemplo») y pulsa Calcular.")
+            return ""
+        if _is_inventario(m):
+            mdl = self.inv_panel.current_model()
+            if not mdl or self.inv_panel.model_key() != INVENTORY_LABEL_TO_KEY.get(m):
+                return "genera la función de costo en el panel de Inventario para calcular."
+            return ""
+        if not self.edt_fx.text().strip() and m not in _MO_SCHAFFER_FIXED:
+            return "escribe la función f(x) y pulsa Calcular."
+        if m in METHODS_REQUIRE_CONSTRAINT and not self.edt_gx.text().strip():
+            return "este método necesita la restricción g(x); escríbela y pulsa Calcular."
+        return ""
+
+    def _auto_run(self):
+        """Recalcula tras un cambio de método. Los avisos de validación van a
+        la línea de estado del dashboard en lugar de abrir ventanas modales."""
+        m = self.cmb.currentText().strip()
+        if not m or self._auto_run_blocker(m):
+            return
+        notes: list = []
+        g = globals()
+        orig_warning, orig_err = QMsgBox.warning, g["_err"]
+        QMsgBox.warning = staticmethod(
+            lambda *a, **k: notes.append(str(a[2]) if len(a) > 2 else ""))
+        g["_err"] = lambda parent, title, msg, detail="": notes.append(str(msg))
+        self._auto_running = True
+        try:
+            self.ejecutar()
+        finally:
+            QMsgBox.warning, g["_err"] = orig_warning, orig_err
+            self._auto_running = False
+        if notes and not self._shown_method:
+            self.lbl_dash.setText(f"⚠ {m}: {notes[-1].strip().splitlines()[0]}")
+
+    def _set_result_visible(self, visible: bool):
+        box = getattr(self, "result_box", None)
+        if box is None:
+            return
+        box.setVisible(visible)
+        if self.ai_panel is not None and hasattr(self.ai_panel, "set_result_visible"):
+            self.ai_panel.set_result_visible(visible)
+
+    def _on_result_presented(self, ev):
+        """El recuadro vive en el chat: se abre el panel para que se vea."""
+        if self.ai_panel is None or not hasattr(self.ai_panel, "set_result_visible"):
+            return
+        # Solo los errores abren el chat (lo hace Opti con chat_open_requested);
+        # un resultado correcto actualiza el recuadro sin abrir nada.
+        self._set_result_visible(True)
+
+    def _dash_failed(self, m: str, why: str):
+        """Un cálculo que falla no deja a la vista resultados anteriores."""
+        self._shown_method = ""
+        self._reset()
+        self.lbl_dash.setText(f"✗ {m}: {why} — no se muestran resultados anteriores.")
+        for lbl in (self.lbl_2d, self.lbl_3d):
+            lbl.setText(f"✗ Sin gráfica: el cálculo de «{m}» no terminó correctamente.")
 
     def _on_inventory_built(self, model: dict, algo: str):
         """
@@ -1671,7 +2036,15 @@ class InterfazOptimizacion(QMW):
 
     # ── RESET ─────────────────────────────────────────────────────────────────
     def _reset(self):
+        timer = getattr(self, "_rot_timer", None)
+        if timer is not None:
+            try: timer.stop()
+            except Exception: pass
+        self._plot_data = {}
+        self._table_keys = []
         self.table.setRowCount(0); self.table.setColumnCount(0)
+        self.lbl_2d.setText("Ejecute un método para ver la gráfica 2D.")
+        self.lbl_3d.setText("Ejecute un método para ver la gráfica 3D.")
         self.lbl_2d.setVisible(True); self.lbl_3d.setVisible(True)
         for c in (self.canvas2d, self.canvas3d):
             if c:
@@ -1716,6 +2089,7 @@ class InterfazOptimizacion(QMW):
         """
         if not self.canvas2d or not hasattr(self.canvas2d, "fig"):
             return
+        self.canvas2d.setToolTip("💡 Haz clic en la gráfica para recalcular desde ese punto")
 
         # ── Desconectar evento anterior ──────────────────────────────────────
         if self._click_cid is not None:
@@ -1735,6 +2109,8 @@ class InterfazOptimizacion(QMW):
 
         # ── Helper: ¿el evento cae sobre la leyenda del canvas 2D? ────────────
         def _click_on_legend(ev):
+            if getattr(ev, "_opti_legend_handled", False):
+                return True       # doble clic que contrajo/expandió una leyenda
             try:
                 fig2 = self.canvas2d.fig
                 if not fig2.axes:
@@ -2029,18 +2405,34 @@ class InterfazOptimizacion(QMW):
     def _run(self, metodo, fx, gx, vars_, x0, lo, hi, tol_L):
         """Delega a app.application.optimization_service.run_method (Fase 4b)."""
         mo_x0, mo_alpha = self._read_mo_params()
-        hist, mo_context = _run_method(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
-                                        mo_x0=mo_x0, mo_alpha=mo_alpha)
+        hist, mo_context = _dv.run_in_thread(_run_method, metodo, fx, gx, vars_, x0, lo, hi,
+                                             tol_L, mo_x0=mo_x0, mo_alpha=mo_alpha)
         self._apply_mo_context(mo_context)
         return hist
 
     # ── CALCULAR ──────────────────────────────────────────────────────────────
     def ejecutar(self):
+        self._auto_timer.stop()
+        self._calc_gen += 1
+        _gen = self._calc_gen
         try:
             m = self.cmb.currentText().strip()
+            # Cada corrida parte de un dashboard vacío: nada del cálculo anterior
+            self._shown_method = ""
+            self._plot_data = {}
+            self._reset()
+            self.lbl_dash.setText(f"Método seleccionado: {m or '—'} — sin resultados "
+                                  "(revisa los datos ingresados).")
+            for _lbl in (self.lbl_2d, self.lbl_3d):
+                _lbl.setText(f"Sin gráfica: el cálculo de «{m}» no se completó "
+                             "(revisa los datos o la explicación de Opti).")
             if not m:
                 QMsgBox.warning(self, "⚠ Dato faltante",
                     "Por favor selecciona un método de optimización antes de calcular.")
+                return
+
+            if is_problem_method(m):
+                self._ejecutar_problema(m, _gen)
                 return
 
             # ── Módulo de Inventario: sustituye f(x)/rango por los generados
@@ -2074,6 +2466,11 @@ class InterfazOptimizacion(QMW):
 
             fx = self.edt_fx.text().strip()
             if not fx and m not in _MO_SCHAFFER_FIXED:
+                self._intervene(_ra.parameter_event(
+                    m, "", "No se ingresó la función f(x).",
+                    "El método necesita una función objetivo para poder optimizarla.",
+                    "Escribe la función en el campo f(x), por ejemplo (x-3)**2 + 2, "
+                    "y vuelve a pulsar Calcular."))
                 QMsgBox.warning(self, "⚠ Dato faltante",
                     "Por favor ingresa la función f(x).\nEjemplo: -(x-3)**2 + 10")
                 return
@@ -2083,6 +2480,11 @@ class InterfazOptimizacion(QMW):
 
             lo, hi = self.smin.value(), self.smax.value()
             if lo >= hi:
+                self._intervene(_ra.parameter_event(
+                    m, fx, f"Rango inválido: mínimo {lo} ≥ máximo {hi}.",
+                    "El intervalo de búsqueda [mín, máx] está vacío o invertido.",
+                    "Haz que el valor mínimo sea menor que el máximo (por ejemplo [0, 5]).",
+                    lo, hi))
                 QMsgBox.warning(self, "⚠ Rango inválido",
                     f"El valor mínimo ({lo}) debe ser menor que el máximo ({hi}).\n"
                     "Corrige el rango de búsqueda.")
@@ -2115,6 +2517,9 @@ class InterfazOptimizacion(QMW):
 
                     if not (isinstance(_test_y, (int, float)) and
                             not math.isinf(_test_y) and not math.isnan(_test_y)):
+                        self._intervene(_ra.event_from_eval_problem(
+                            m, fx, [], _px0(self.edt_x0.text()), lo, hi,
+                            [(lo + hi) / 2.0], _test_y))
                         if math.isinf(_test_y):
                             QMsgBox.warning(self, "⚠ Función divergente",
                                 f"La función tiende a infinito en el punto de prueba.\n"
@@ -2127,6 +2532,8 @@ class InterfazOptimizacion(QMW):
                             return
                 except ValueError as eval_err:
                     # Error de sintaxis real — mostrar mensaje claro
+                    self._intervene(_ra.classify_exception(
+                        m, fx, [], _px0(self.edt_x0.text()), lo, hi, eval_err))
                     QMsgBox.warning(self, "⚠ Error en la función",
                         f"No se puede evaluar  f(x) = {fx}\n\n"
                         f"Causa: {eval_err}\n\n"
@@ -2142,6 +2549,11 @@ class InterfazOptimizacion(QMW):
 
             gx    = self.edt_gx.text().strip()
             if m in METHODS_REQUIRE_CONSTRAINT and not gx:
+                self._intervene(_ra.parameter_event(
+                    m, fx, "Falta la restricción g(x).",
+                    f"«{m}» aplica penalización/barrera sobre una restricción y no hay ninguna.",
+                    "Ingresa una restricción (ej.: x1+x2-5) o usa un método sin restricción "
+                    "como Newton-Raphson o Grad. Conjugado.", lo, hi))
                 QMsgBox.warning(self, "⚠ Falta la restricción g(x)",
                     f"El método «{m}» aplica penalización/barrera/suma sobre "
                     f"una restricción, así que necesita que definas g(x).\n\n"
@@ -2159,17 +2571,39 @@ class InterfazOptimizacion(QMW):
                 try:
                     tol_L = float(self.edt_tol.text().strip())
                     if tol_L <= 0:
+                        self._intervene(_ra.parameter_event(
+                            m, fx, f"Tolerancia L = {tol_L} no válida.",
+                            "La tolerancia debe ser un número positivo mayor que cero.",
+                            "Usa una tolerancia positiva, por ejemplo L = 0.1 o 0.01.", lo, hi))
                         QMsgBox.warning(self, "⚠ Tolerancia inválida",
                             "La tolerancia L debe ser un número positivo mayor que cero.")
                         return
                 except ValueError:
+                    self._intervene(_ra.parameter_event(
+                        m, fx, "La tolerancia L no es un número.",
+                        "El campo de tolerancia contiene texto que no es numérico.",
+                        "Escribe un número positivo, por ejemplo 0.1.", lo, hi))
                     QMsgBox.warning(self, "⚠ Tolerancia inválida",
                         "El valor de tolerancia L no es un número válido.\nEjemplo: 0.1")
                     return
 
-            self.lbl_st.setText("⏳ Calculando…"); QApp.processEvents()
+            # Detector previo: f debe estar definida en el punto inicial real
+            _pre = _ra.preflight(m, fx, vars_, x0, lo, hi)
+            if _pre is not None:
+                self.lbl_st.setText(f"✗ {_pre.title}: {_pre.error_message}")
+                self._intervene(_pre)
+                return
 
+            self.lbl_st.setText("⏳ Calculando…")
+            self.lbl_dash.setText(f"⏳ Calculando «{inv_label if inv_active else m}»…")
+            QApp.processEvents()
+
+            import time as _time
+            _t0 = _time.perf_counter()
             hist = self._run(m, fx, gx, vars_, x0, lo, hi, tol_L)
+            _dur = _time.perf_counter() - _t0
+            if _gen != self._calc_gen:
+                return      # el usuario eligió otro método o recalculó mientras tanto
 
             # Validar resultados numéricos
             _validate_hist(hist)
@@ -2208,6 +2642,9 @@ class InterfazOptimizacion(QMW):
             self._render_plots(m, fx, self._vars, hist,
                                x0 if (_is_md(m) or _is_ls(m)) else [lo], lo, hi)
             self._connect_click()
+            self._shown_method = self.cmb.currentText().strip()
+            self.lbl_dash.setText(f"📌 Mostrando: {self._shown_method} — {self._rmsg(hist)} "
+                                  f"· {len(hist)} filas de iteración")
 
             # Guardar sesión para exportación completa
             self._session.append({
@@ -2224,9 +2661,29 @@ class InterfazOptimizacion(QMW):
             if inv_active:
                 self.lbl_st.setText(self.lbl_st.text() + f"  ·  {inv_label}")
                 self.inv_panel.show_results(self._session[-1])
-            self._update_ai_context()
+            self._update_ai_context(explain=self.intervention is None)
+            # Punto inicial real: si el usuario no lo indicó, el motor eligió uno
+            _p0 = _dv.row_point(hist[0]) if hist else None
+            _x0_ev = (x0 if (_px0(self.edt_x0.text()) or _p0 is None or not
+                             (_is_ls(m) or _needs_x0(m))) else [float(v) for v in _p0])
+            _ev = _ra.classify_result(m, fx, self._vars, _x0_ev, lo, hi, hist,
+                                      result_summary=self._rmsg(hist), gx=gx,
+                                      tol_L=tol_L, duration_s=_dur)
+            if _ev.kind != _ra.SUCCESS:
+                # No presentar como éxito un cálculo que no convergió
+                self.lbl_st.setText(f"⚠ {m}: {_ev.title.lower()} → {self._rmsg(hist)}")
+            self._intervene(_ev)
 
         except _NumericalWarning as nw:
+            try:
+                _ev = _ra.classify_result(m, fx, vars_, x0, lo, hi, hist, gx=gx,
+                                          tol_L=tol_L)
+                if _ev.kind == _ra.SUCCESS:
+                    _ev.kind = _ra.WARNING
+                _ev.error_message = _ev.error_message or str(nw)
+                self._intervene(_ev)
+            except Exception:
+                pass
             QMsgBox.warning(self, "⚠ Advertencia numérica", str(nw))
             self.lbl_st.setText(f"⚠ Resultado numérico problemático.")
             # Intentar renderizar la gráfica igualmente para que el usuario
@@ -2243,6 +2700,9 @@ class InterfazOptimizacion(QMW):
                 self._render_plots(m, fx, self._vars, hist,
                                    x0 if _is_md(m) else [lo], lo, hi)
                 self._connect_click()
+                self._shown_method = self.cmb.currentText().strip()
+                self.lbl_dash.setText(f"⚠ Mostrando: {self._shown_method} — resultado numérico "
+                                      f"problemático: {nw}")
                 self._session.append({
                     "metodo": m, "fx": fx, "gx": gx,
                     "vars": list(self._vars), "x0": list(x0),
@@ -2254,11 +2714,187 @@ class InterfazOptimizacion(QMW):
             except Exception:
                 pass  # Si la gráfica también falla, no pasa nada
         except Exception as e:
+            if _gen != self._calc_gen:
+                return      # error de una corrida ya reemplazada: no se muestra
             self.lbl_st.setText("✗ Error.")
+            self._dash_failed(locals().get("m", ""), str(e).splitlines()[0] if str(e) else
+                              type(e).__name__)
+            _l = locals()
+            try:
+                self._intervene(_ra.classify_exception(
+                    _l.get("m", ""), _l.get("fx", ""), _l.get("vars_", []),
+                    _l.get("x0", []), _l.get("lo"), _l.get("hi"), e))
+            except Exception:
+                pass
             _err(self, "Error", str(e), traceback.format_exc())
+
+    def _ejecutar_problema(self, m: str, gen: Optional[int] = None):
+        """Resuelve un método del catálogo y lo publica en la tabla, las gráficas
+        2D/3D, la sesión de exportación y el historial, como cualquier otro."""
+        gen = self._calc_gen if gen is None else gen
+        values = self.prob_panel.values()
+        self.lbl_st.setText("⏳ Calculando…")
+        self.lbl_dash.setText(f"⏳ Calculando «{m}»…")
+        QApp.processEvents()
+        try:
+            res = _dv.run_in_thread(solve_problem, m, values)
+        except ValueError as ex:
+            if gen != self._calc_gen:
+                return
+            self.lbl_st.setText("✗ Revisa los datos ingresados.")
+            self._dash_failed(m, str(ex).splitlines()[0] if str(ex) else "datos inválidos")
+            self._intervene(_ra.OptimizationEvent(
+                kind=_ra.PARAMETER_ERROR, metodo=m, error_message=str(ex).splitlines()[0] if str(ex) else "",
+                cause="Los datos ingresados en el panel del problema no son válidos para este método.",
+                recommendation="Revisa las cantidades del panel (dimensiones, valores positivos, "
+                               "campos vacíos) y vuelve a calcular."))
+            QMsgBox.warning(self, "⚠ Datos inválidos", str(ex))
+            return
+        if gen != self._calc_gen:
+            return          # resultado de una selección anterior: se descarta
+        hist = res["hist"]
+        fx = describe_input(m, values)
+        self._hist = hist; self._metodo = m; self._fx = fx
+        self._vars = []; self._x0 = []; self._gx = ""; self._lo = self._hi = 0.0
+        self._problem_resumen = res["resumen"]
+        self._render_table(hist)
+        _spec = _SPEC_BY_LABEL.get(m)
+        _p3d, _note3d = _dv.problem_plot3d(m, _spec.group if _spec else "", values, res)
+        self._render_problem_plot(_dv.problem_plot2d(m, values, res), _p3d, _note3d)
+        self._shown_method = self.cmb.currentText().strip()
+        self.lbl_dash.setText(f"📌 Mostrando: {m} — {res['resumen']} · {len(hist)} filas")
+        self._session.append({
+            "metodo": m, "fx": fx, "gx": "", "vars": [], "x0": [],
+            "lo": 0.0, "hi": 0.0, "hist": hist, "traj": [],
+            "resumen": res["resumen"], "plot_fn": res.get("plot"),
+        })
+        self._log_history(m, fx, hist, params=values)
+        self.lbl_st.setText(f"✓ {m} → {res['resumen']}")
+        self._update_ai_context(explain=self.intervention is None)
+        self._intervene(_ra.OptimizationEvent(
+            kind=_ra.SUCCESS, metodo=m, fx=fx, iterations=len(hist),
+            converged=True, result_summary=str(res["resumen"])))
+
+    def _open_diagnostic(self):
+        try:
+            from app.ui.result_box import DiagnosticDialog
+            DiagnosticDialog(self).exec_()
+        except Exception as ex:
+            QMsgBox.warning(self, "Diagnóstico", f"No se pudo abrir el diagnóstico: {ex}")
+
+    # ── Opti: chat desplegable sincronizado con la intervención ─────────────
+    def _wire_opti(self):
+        ctrl, p = self.intervention, self.ai_panel
+        if ctrl is None or p is None or not hasattr(p, "post_opti_message"):
+            return
+        ctrl.chat_open_requested.connect(self._opti_open_chat)
+        ctrl.chat_message.connect(self._opti_chat_message)
+        ctrl.speech_state.connect(self._opti_speech_state)
+        p.user_message_sent.connect(lambda _t: ctrl.user_took_over())
+        p.btn_player_stop.clicked.connect(ctrl.stop)
+        p.close_requested.connect(lambda: self.btn_ai.setChecked(False))
+
+    def _opti_open_chat(self, ev):
+        p = self.ai_panel
+        if p is None:
+            return
+        if p._response_mode is None:
+            # Las respuestas del chat seguirán la configuración de voz de Opti
+            p._set_response_mode("ambas" if self.intervention.voice_enabled else "escrita")
+        if hasattr(self, "btn_ai") and not self.btn_ai.isChecked():
+            self._opti_auto_open = True
+            try:
+                self.btn_ai.setChecked(True)
+            finally:
+                self._opti_auto_open = False
+        p.setVisible(True)
+
+    def _opti_chat_message(self, ev, part, text):
+        if self.ai_panel is not None:
+            ctx = _ra.build_ai_prompt(ev) if part == "explanation" else ""
+            self.ai_panel.post_opti_message(part, text, ctx)
+
+    def _opti_speech_state(self, state):
+        p = self.ai_panel
+        if p is None:
+            return
+        from app.infrastructure import auto_intervention as _ai
+        if state in (_ai.REQUESTED, _ai.PLAYING):
+            p.set_opti_state("🔊 Opti está hablando")
+        elif state in (_ai.FINISHED, _ai.STOPPED, _ai.OFF) or state.startswith("error:"):
+            p.set_opti_state("")
+
+    def _intervene(self, ev):
+        """Entrega un evento del motor a la intervención automática de la IA
+        (recuadro + explicación + voz). Nunca interrumpe el flujo del cálculo."""
+        if ev is None or getattr(self, "intervention", None) is None:
+            return
+        try:
+            self.intervention.submit(ev)
+            if ev.kind != _ra.SUCCESS and self.ai_panel is not None:
+                # Para que el chat manual también conozca el error ocurrido
+                self.ai_panel.update_context(
+                    metodo=ev.metodo, fx=ev.fx,
+                    result_summary=f"{ev.title}: {ev.error_message} {ev.cause}".strip(),
+                    lo=ev.lo or 0.0, hi=ev.hi or 0.0)
+        except Exception as ex:
+            print(f"[IA auto] {ex}")
+
+    def _render_problem_plot(self, plot, plot3d=None, note3d: str = ""):
+        # El clic sobre la gráfica recalcula una f(x); aquí no existe ninguna.
+        if self._click_cid is not None and self.canvas2d:
+            try: self.canvas2d.fig.canvas.mpl_disconnect(self._click_cid)
+            except Exception: pass
+            self._click_cid = None
+        timer = getattr(self, "_rot_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._plot_data = {"kind": "problem", "has_3d": False, "note3d": note3d}
+        if self.canvas3d and plot3d is not None and hasattr(self.canvas3d, "fig"):
+            try:
+                fig3 = self.canvas3d.fig
+                fig3.clear()
+                fig3.set_facecolor("#0a1228")
+                plot3d(fig3)
+                fig3.text(0.01, 0.01, note3d, color="#7aaaea", fontsize=7, wrap=True)
+                self.canvas3d.setToolTip(note3d)
+                self.lbl_3d.setVisible(False)
+                self.canvas3d.setVisible(True)
+                self.canvas3d.draw()
+                self._plot_data["has_3d"] = True
+            except Exception as ex:
+                plot3d, note3d = None, f"no se pudo dibujar con estos datos ({ex})."
+        if plot3d is None:
+            if self.canvas3d:
+                self.canvas3d.clear()
+                self.canvas3d.setVisible(False)
+            self.lbl_3d.setText(f"Sin gráfica 3D para este método: {note3d or 'no aplica.'}")
+            self.lbl_3d.setWordWrap(True)
+            self.lbl_3d.setVisible(True)
+
+        c = self.canvas2d
+        if c is None or plot is None:
+            if c is not None:
+                c.setVisible(False)
+            self.lbl_2d.setText("Este método no genera gráfica 2D.")
+            self.lbl_2d.setVisible(True)
+            return
+        fig = c.fig
+        fig.clear()
+        fig.set_facecolor("#0a1228")
+        plot(fig)
+        style_figure(fig)
+        try: fig.tight_layout()
+        except Exception: pass
+        c.setToolTip("")
+        self.lbl_2d.setVisible(False)
+        c.setVisible(True)
+        c.draw()
 
     def _rmsg(self, hist):
         if not hist: return "sin resultado"
+        if is_problem_method(self._metodo):
+            return getattr(self, "_problem_resumen", "ver tabla")
         last = hist[-1]
 
         # ── Multiobjetivo: claves especiales ──────────────────────────────────
@@ -2322,11 +2958,18 @@ class InterfazOptimizacion(QMW):
         if self.ai_panel and hasattr(self.ai_panel, 'update_session_methods'):
             self.ai_panel.update_session_methods([])
         self.md_sec.setVisible(False); self.row_tol.setVisible(False)
-        self._reset()
+        self.prob_panel.forget()
+        self.inv_panel.clear_values()        # «Limpiar» también vacía inventario
+        self.lbl_f_file.setVisible(False)
+        self._on_method()
+        self._invalidate_dashboard()
+        self.lbl_dash.setText("Selecciona un método y pulsa Calcular.")
 
     # ── HISTORIAL ─────────────────────────────────────────────────────────────
-    def _log_history(self, metodo: str, fx: str, hist: list):
-        """Registra una entrada en el historial persistente."""
+    def _log_history(self, metodo: str, fx: str, hist: list, params: Optional[dict] = None):
+        """Registra una entrada en el historial persistente. `params` guarda
+        los datos del formulario de los métodos del catálogo, para que
+        Cargar/Recalcular repita exactamente esa corrida."""
         import datetime
         # resultado final
         xopt = fopt = float("nan")
@@ -2344,6 +2987,7 @@ class InterfazOptimizacion(QMW):
             "iters": len(hist),
             "xopt": xopt,
             "fopt": fopt,
+            "params": dict(params) if params else None,
         })
 
     def _show_historial(self):
@@ -2457,10 +3101,9 @@ class InterfazOptimizacion(QMW):
             # Cargar función
             self.edt_fx.setText(entry["fx"])
             # Cargar método si corresponde
-            metodo = entry["metodo"]
-            idx = self.cmb.findText(metodo)
-            if idx >= 0:
-                self.cmb.setCurrentIndex(idx)
+            self.select_method(entry["metodo"])
+            if entry.get("params") and is_problem_method(entry["metodo"]):
+                self.prob_panel.set_values(entry["params"])
             # Cerrar diálogo
             dlg.accept()
             # Recalcular si se pidió
@@ -2591,21 +3234,25 @@ class InterfazOptimizacion(QMW):
 
     # ── TABLA ─────────────────────────────────────────────────────────────────
     def _render_table(self, hist):
+        self._table_keys = []
         if not hist: self.table.setRowCount(0); self.table.setColumnCount(0); return
-        cols: List[str] = []
-        for r in hist:
-            for k in r:
-                if k not in cols: cols.append(k)
-        if "x_k_str" in cols and "x_k" in cols: cols.remove("x_k")
+        # Columnas propias de cada método (las del historial del motor), con
+        # encabezados legibles y sin repetir el mismo dato con otro nombre.
+        _m = getattr(self, "_metodo", "")
+        # Las tablas del catálogo ya traen encabezados propios (p. ej. «t» de Student)
+        cols, heads = _dv.table_layout(hist, constrained=_is_md(_m),
+                                       readable=not is_problem_method(_m))
         self.table.setColumnCount(len(cols))
-        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setHorizontalHeaderLabels(heads)
+        for j, col in enumerate(cols):
+            item = self.table.horizontalHeaderItem(j)
+            if item is not None:
+                item.setToolTip(f"Dato del motor: «{col}»")
         self.table.setRowCount(len(hist))
         for i,row in enumerate(hist):
             for j,col in enumerate(cols):
-                v = row.get(col,"")
-                if isinstance(v,np.ndarray): v="["+", ".join(f"{x:.5g}" for x in v.flat)+"]"
-                elif isinstance(v,float):    v=f"{v:.6g}"
-                self.table.setItem(i,j,QTI(str(v)))
+                self.table.setItem(i,j,QTI(_dv.cell_text(row.get(col,""))))
+        self._table_keys = cols
         try:
             self.table.horizontalHeader().setSectionResizeMode(
                 QHV.ResizeMode.Stretch if _QT=="PyQt6" else QHV.Stretch)
@@ -2639,12 +3286,35 @@ class InterfazOptimizacion(QMW):
                 elif len(_expr_vars) != len(vars_):
                     # Diferente cantidad → usar detectadas
                     vars_ = _expr_vars
-        # Limitar a 2 variables para las gráficas (siempre mostramos 1D o 2D)
+        # Más de 2 variables: no existe una superficie de f que se pueda dibujar sin
+        # fijar arbitrariamente las demás → alternativa real: convergencia de f.
         if len(vars_) > 2:
-            vars_ = vars_[:2]
-
+            self._render_convergence_only(metodo, vars_, hist)
+            return
 
         traj = self._traj(vars_, hist, x0)
+        # Rango de dibujo: el intervalo del usuario ampliado para incluir todos
+        # los puntos reales del algoritmo (ninguna iteración queda fuera).
+        _tr_all = np.concatenate([t for t in traj if t.size]) if traj else np.array([])
+        _tr_all = _tr_all[np.isfinite(_tr_all)] if _tr_all.size else _tr_all
+        if _tr_all.size:
+            _m = 0.05 * max(hi - lo, float(_tr_all.max() - _tr_all.min()), 1e-9)
+            lo = min(lo, float(_tr_all.min()) - _m)
+            hi = max(hi, float(_tr_all.max()) + _m)
+        _rows_pt = [r for r in hist if _dv.row_point(r) is not None]
+        _ivs = [_dv.row_interval(r) for r in _rows_pt]
+        self._plot_data = {"kind": "function", "metodo": metodo, "vars": list(vars_),
+                           "traj": [np.asarray(t, dtype=float).copy() for t in traj]}
+        # Metaheurísticas: si la última fila no es la mejor encontrada, el
+        # marcador final se rotula como último punto (no como óptimo).
+        _last = hist[-1] if hist else {}
+        _xs = "x*"
+        try:
+            if "f_best" in _last and abs(float(_last["f_k"]) - float(_last["f_best"])) >                     1e-12 * max(1.0, abs(float(_last["f_best"]))):
+                _xs = f"Último xₖ (mejor f = {float(_last['f_best']):.6g})"
+        except (KeyError, TypeError, ValueError):
+            pass
+        self._plot_data["opt_label"] = _xs
         BG    = "#0a1228"
         CC    = "#4a9eff"   # curva principal
         CT    = "#ff6b35"   # trayectoria
@@ -2682,8 +3352,17 @@ class InterfazOptimizacion(QMW):
                     yg = _e1d(fx, vars_, xg)
                     ax.plot(xg, yg, color=CC, lw=2.2, label=f"f(x) = {fx}", zorder=2)
 
+                    # Intervalo de búsqueda real (métodos de intervalo): inicial y final
+                    _iv_ok = [iv for iv in _ivs if iv is not None]
+                    if _iv_ok:
+                        ax.axvspan(_iv_ok[-1][0], _iv_ok[-1][1], color="#3cff8a", alpha=0.18,
+                                   label=f"Intervalo final [{_iv_ok[-1][0]:.4g}, {_iv_ok[-1][1]:.4g}]")
+                        for _b in _iv_ok[0]:
+                            ax.axvline(_b, color="#3cff8a", lw=0.9, ls=":", alpha=0.8)
                     if traj and traj[0].size > 0:
                         tx = traj[0]; ty = _e1d(fx, vars_, tx)
+                        self._plot_data.update(x=tx.copy(), f=np.asarray(ty, dtype=float).copy(),
+                                               opt=(float(tx[-1]), float(ty[-1])))
                         # Línea de trayectoria degradada
                         for i in range(len(tx)-1):
                             alpha = 0.3 + 0.7*(i/(max(len(tx)-1,1)))
@@ -2696,7 +3375,8 @@ class InterfazOptimizacion(QMW):
                                 markersize=9, label=f"x₀ = {tx[0]:.4f}", zorder=6)
                         # Punto óptimo
                         ax.plot(tx[-1], ty[-1], 'D', color=CM, markersize=7,
-                                label=f"x* = {tx[-1]:.4f}, f* = {ty[-1]:.4f}", zorder=7)
+                                label=(f"x* = {tx[-1]:.4f}, f* = {ty[-1]:.4f}" if _xs == "x*"
+                                       else f"{_xs}: x = {tx[-1]:.4f}"), zorder=7)
                         # Línea vertical al óptimo
                         ax.axvline(tx[-1], color=CM, lw=0.8, linestyle='--', alpha=0.5)
                         ax.axhline(ty[-1], color=CM, lw=0.8, linestyle='--', alpha=0.5)
@@ -2716,13 +3396,17 @@ class InterfazOptimizacion(QMW):
                     fig.colorbar(cf, ax=ax, fraction=0.035, pad=0.04).ax.tick_params(colors="#7aaaea")
                     if traj and len(traj) >= 2 and traj[0].size > 0:
                         px, py = traj[0], traj[1]
+                        _pz = np.broadcast_to(np.asarray(_callable(fx, vars_[:2])(px, py),
+                                                         dtype=float), px.shape)
+                        self._plot_data.update(x=px.copy(), y=py.copy(), f=_pz.copy(),
+                                               opt=(float(px[-1]), float(py[-1]), float(_pz[-1])))
                         ax.plot(px, py, '-', color=CT, lw=2, alpha=0.8, zorder=4)
                         ax.scatter(px, py, c=range(len(px)), cmap='YlOrRd',
                                    s=45, zorder=5, edgecolors='none', label="Iteraciones")
                         ax.plot(px[0],  py[0],  'o', color="#00e5ff",
                                 markersize=9, label="x₀", zorder=6)
                         ax.plot(px[-1], py[-1], 'D', color=CM,
-                                markersize=7, label="x*", zorder=7)
+                                markersize=7, label=_xs, zorder=7)
                         ax.annotate(f"x*=({px[-1]:.3f},{py[-1]:.3f})",
                                     xy=(px[-1], py[-1]),
                                     xytext=(px[-1]+0.05*(hi-lo), py[-1]+0.05*(hi-lo)),
@@ -2782,20 +3466,41 @@ class InterfazOptimizacion(QMW):
                 _style_ax3d(ax3)
 
                 if len(vars_) == 1:
-                    xg = _grid(lo, hi, 150)
-                    yg = _e1d(fx, vars_, xg)
-                    it = np.arange(xg.size, dtype=float)
-                    ax3.plot(it, xg, yg, color=CC, lw=1.8, label="f(x)", alpha=0.9)
-                    if traj and traj[0].size > 0:
-                        tx = traj[0]; ty = _e1d(fx, vars_, tx)
-                        pit = np.arange(tx.size, dtype=float)
-                        ax3.plot(pit, tx, ty, 'o-', color=CT, lw=2.5,
-                                 markersize=6, label="Trayectoria", zorder=5)
-                        ax3.plot([pit[0]],  [tx[0]],  [ty[0]],  'o',
-                                 color="#00e5ff", markersize=9, label="x₀", zorder=6)
-                        ax3.plot([pit[-1]], [tx[-1]], [ty[-1]], 'D',
-                                 color=CM, markersize=7, label="x*", zorder=7)
-                    ax3.set_xlabel("iter."); ax3.set_ylabel(vars_[0]); ax3.set_zlabel("f(x)")
+                    # Superficie de evolución: para cada iteración real k, f(x)
+                    # sobre el intervalo de búsqueda de esa iteración (o el rango
+                    # completo si el método no usa intervalo). Ejes: k, x, f(x).
+                    if not (traj and traj[0].size > 0):
+                        raise ValueError("el método no reportó puntos de iteración; "
+                                         "no hay datos reales para la vista 3D")
+                    tx = traj[0]; ty = _e1d(fx, vars_, tx)
+                    pit = np.arange(tx.size, dtype=float)
+                    sel = np.unique(np.linspace(0, tx.size - 1, min(tx.size, 60)).astype(int))
+                    has_iv = len(_ivs) == tx.size and all(iv is not None for iv in _ivs)
+                    K, XS, ZS = [], [], []
+                    for i in sel:
+                        a_i, b_i = _ivs[i] if has_iv else (lo, hi)
+                        xs = np.linspace(a_i, b_i, 80)
+                        K.append(np.full(xs.size, float(i))); XS.append(xs)
+                        ZS.append(np.asarray(_e1d(fx, vars_, xs), dtype=float))
+                    if len(sel) >= 2:
+                        ax3.plot_surface(np.array(K), np.array(XS), np.array(ZS), cmap='coolwarm',
+                                         alpha=0.55, linewidth=0, antialiased=True)
+                    else:
+                        ax3.plot(K[0], XS[0], ZS[0], color=CC, lw=1.8, label="f(x)")
+                    ax3.plot(pit, tx, ty, 'o-', color=CT, lw=2.5,
+                             markersize=5, label="xₖ por iteración", zorder=5)
+                    ax3.plot([pit[0]],  [tx[0]],  [ty[0]],  'o',
+                             color="#00e5ff", markersize=9, label="x₀", zorder=6)
+                    ax3.plot([pit[-1]], [tx[-1]], [ty[-1]], 'D',
+                             color=CM, markersize=7, label=_xs, zorder=7)
+                    ax3.set_xlabel("Iteración k"); ax3.set_ylabel(vars_[0]); ax3.set_zlabel("f(x)")
+                    self._plot_data["note3d"] = (
+                        "Ejes: iteración k (real), " + vars_[0] + " y f(" + vars_[0] + "). "
+                        + ("Cada franja es f sobre el intervalo [aₖ, bₖ] reportado por el método."
+                           if has_iv else "Cada franja es f sobre el rango de búsqueda; "
+                           "el recorrido marca el punto real de cada iteración."))
+                    fig3.text(0.01, 0.01, self._plot_data["note3d"], color="#7aaaea",
+                              fontsize=7, wrap=True)
                 else:
                     g  = np.linspace(min(lo,hi), max(lo,hi), 60)
                     X1, X2 = np.meshgrid(g, g)
@@ -2815,7 +3520,7 @@ class InterfazOptimizacion(QMW):
                         ax3.plot([px[0]],  [py[0]],  [pz[0]],  'o',
                                  color="#00e5ff", markersize=9, label="x₀", zorder=6)
                         ax3.plot([px[-1]], [py[-1]], [pz[-1]], 'D',
-                                 color=CM, markersize=7, label="x*", zorder=7)
+                                 color=CM, markersize=7, label=_xs, zorder=7)
                     ax3.set_xlabel(vars_[0]); ax3.set_ylabel(vars_[1]); ax3.set_zlabel("f(x)")
 
                 ax3.set_title(f"3D — {metodo}", fontsize=10, color="#d8e8f8", pad=10)
@@ -2884,6 +3589,103 @@ class InterfazOptimizacion(QMW):
                 self.canvas3d.setVisible(False)
 
 
+
+    def _finish_canvases(self):
+        """Tras cualquier dibujo: leyendas arrastrables/plegables en 2D y 3D, y
+        giro automático (pausado mientras el usuario gira con el ratón) en 3D."""
+        for c in (self.canvas2d, self.canvas3d):
+            if c is None or not hasattr(c, "fig") or c.isHidden():
+                continue
+            try:
+                if _dv.install_legend_tools(c.fig, c):
+                    tip = c.toolTip() or ""
+                    if _dv.LEGEND_HINT not in tip:
+                        c.setToolTip((tip + "\n" if tip else "") + _dv.LEGEND_HINT)
+                c.draw_idle()
+            except Exception:
+                pass
+        self._start_3d_rotation()
+
+    def _start_3d_rotation(self):
+        timer = getattr(self, "_rot_timer", None)
+        if timer is not None:
+            try: timer.stop()
+            except Exception: pass
+        c = self.canvas3d
+        if c is None or not hasattr(c, "fig") or c.isHidden():
+            return
+        ax3 = next((a for a in c.fig.axes if getattr(a, "name", "") == "3d"), None)
+        if ax3 is None:
+            return
+        try:
+            ax3.mouse_init()           # giro manual: arrastrar con el botón izquierdo
+        except Exception:
+            pass
+        self._rot_ax3, self._rot_canvas = ax3, c
+        self._rot_paused = False
+        self._rot_timer = QtCore.QTimer(self)
+
+        def _rotate():
+            if self._rot_paused:
+                return
+            try:
+                ax3.view_init(elev=ax3.elev, azim=(ax3.azim + 0.8) % 360)
+                c.draw_idle()
+            except Exception:
+                self._rot_timer.stop()
+        self._rot_timer.timeout.connect(_rotate)
+        self._rot_timer.start(40)
+        if not getattr(c.fig, "_opti_rot_cids", None):
+            def _pause(_ev):
+                self._rot_paused = True
+            def _resume(_ev):
+                self._rot_paused = False
+            c.fig._opti_rot_cids = (c.fig.canvas.mpl_connect("button_press_event", _pause),
+                                    c.fig.canvas.mpl_connect("button_release_event", _resume))
+        if "gira" not in (c.toolTip() or ""):
+            c.setToolTip(((c.toolTip() + "\n") if c.toolTip() else "") +
+                         "3D: gira sola; arrástrala con el ratón para girarla a mano.")
+
+    def _render_convergence_only(self, metodo, vars_, hist):
+        """f con más de 2 variables: la superficie no se puede dibujar sin fijar
+        arbitrariamente las demás. Se muestra la evolución real de f por iteración."""
+        timer = getattr(self, "_rot_timer", None)
+        if timer is not None:
+            timer.stop()
+        ks, fs = [], []
+        for i, r in enumerate(hist):
+            for key in ("f_k", "f(x)", "f_best", "f_opt"):
+                v = r.get(key)
+                if isinstance(v, (int, float, np.number)) and not isinstance(v, bool):
+                    ks.append(i); fs.append(float(v)); break
+        n = len(vars_)
+        why = (f"f depende de {n} variables ({', '.join(vars_)}); una superficie 3D solo "
+               "representa 1 o 2 variables sin fijar valores inventados para las demás.")
+        self._plot_data = {"kind": "convergence", "metodo": metodo, "vars": list(vars_),
+                           "k": np.asarray(ks), "f": np.asarray(fs), "note3d": why}
+        if self.canvas3d:
+            self.canvas3d.clear(); self.canvas3d.setVisible(False)
+        self.lbl_3d.setWordWrap(True)
+        self.lbl_3d.setText(f"Sin gráfica 3D: {why} Consulta la tabla y la convergencia 2D.")
+        self.lbl_3d.setVisible(True)
+        c = self.canvas2d
+        if c is None or not hasattr(c, "fig") or not fs:
+            self.lbl_2d.setText(f"Sin gráfica 2D: {why}")
+            self.lbl_2d.setVisible(True)
+            if c is not None:
+                c.setVisible(False)
+            return
+        fig = c.fig; fig.clear(); fig.set_facecolor("#0a1228")
+        ax = fig.add_subplot(111)
+        ax.plot(ks, fs, "o-", color="#ff6b35", ms=3, label="f(xₖ) del motor")
+        ax.plot([ks[-1]], [fs[-1]], "D", color="#ffd700", label=f"Final f* = {fs[-1]:.6g}")
+        ax.set_xlabel("Iteración"); ax.set_ylabel("f(xₖ)")
+        ax.set_title(f"Convergencia — {metodo} ({n} variables)")
+        ax.legend()
+        style_figure(fig)
+        try: fig.tight_layout()
+        except Exception: pass
+        self.lbl_2d.setVisible(False); c.setVisible(True); c.draw()
 
     # ── GRÁFICAS MULTIOBJETIVO ────────────────────────────────────────────────
     # ── GRÁFICAS MULTIOBJETIVO ───────────────────────────────────────────────
@@ -3168,65 +3970,17 @@ class InterfazOptimizacion(QMW):
                 self.canvas3d.setVisible(False)
 
     def _traj(self, vars_, hist, x0):
-        """Extrae trayectoria de puntos del historial, compatible con arrays numpy."""
-
-        def _first_val(rec, *keys):
-            """Devuelve el primer valor no-None de las claves dadas, seguro con arrays."""
-            for k in keys:
-                v = rec.get(k)
-                if v is None:
-                    continue
-                # numpy array: no se puede evaluar como bool directamente
-                if isinstance(v, np.ndarray):
-                    return v
-                # escalar Python / numpy scalar
-                if isinstance(v, (int, float, np.number)):
-                    return v
-                # lista o tupla
-                if isinstance(v, (list, tuple)) and len(v) > 0:
-                    return v
-            return None
-
-        if not hist:
-            if x0:
-                if len(vars_) == 1:
-                    return [np.asarray([x0[0]], dtype=float)]
-                if len(vars_) >= 2 and len(x0) >= 2:
-                    return [np.asarray([x0[0]]), np.asarray([x0[1]])]
-            return []
-
+        """Trayectoria real del algoritmo: un punto por fila del historial que
+        reporte coordenadas (numéricas, arreglo o texto «[x1 x2]»)."""
+        pts = [p for p in (_dv.row_point(r) for r in (hist or [])) if p is not None]
         if len(vars_) == 1:
-            xs = []
-            for r in hist:
-                v = _first_val(r, "x_k", "x", "lambda_k")
-                if v is None:
-                    continue
-                if isinstance(v, (int, float, np.number)):
-                    xs.append(float(v))
-                elif isinstance(v, np.ndarray):
-                    if v.size == 1:
-                        xs.append(float(v.flat[0]))
-                    elif v.size > 1:
-                        xs.append(float(v.flat[0]))   # tomar primera coordenada
-                elif isinstance(v, (list, tuple)) and len(v) >= 1:
-                    try: xs.append(float(v[0]))
-                    except: pass
-            return [np.asarray(xs, dtype=float)] if xs else []
-
-        # Multivariable: extraer x1, x2
-        x1s, x2s = [], []
-        for r in hist:
-            v = _first_val(r, "x_k", "x")
-            if v is None:
-                continue
-            if isinstance(v, np.ndarray) and v.size >= 2:
-                try: x1s.append(float(v.flat[0])); x2s.append(float(v.flat[1]))
-                except: pass
-            elif isinstance(v, (list, tuple)) and len(v) >= 2:
-                try: x1s.append(float(v[0])); x2s.append(float(v[1]))
-                except: pass
-        if x1s and x2s:
-            return [np.asarray(x1s, dtype=float), np.asarray(x2s, dtype=float)]
+            if pts:
+                return [np.asarray([float(p[0]) for p in pts], dtype=float)]
+            return [np.asarray([x0[0]], dtype=float)] if x0 else []
+        pts2 = [p for p in pts if p.size >= 2]
+        if pts2:
+            return [np.asarray([float(p[0]) for p in pts2], dtype=float),
+                    np.asarray([float(p[1]) for p in pts2], dtype=float)]
         if x0 and len(x0) >= 2:
             return [np.asarray([x0[0]]), np.asarray([x0[1]])]
         return []
@@ -3479,6 +4233,25 @@ class InterfazOptimizacion(QMW):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _with_finish(fn):
+    """Cada render deja leyendas interactivas y el 3D girando (todos los métodos)."""
+    def wrapper(self, *a, **k):
+        result = fn(self, *a, **k)
+        try:
+            self._finish_canvases()
+        except Exception:
+            pass
+        return result
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
+
+
+for _name in ("_render_plots", "_render_plots_multiobj", "_render_problem_plot",
+              "_render_convergence_only"):
+    setattr(InterfazOptimizacion, _name, _with_finish(getattr(InterfazOptimizacion, _name)))
+
 def main():
     app = QApp(sys.argv)
     app.setApplicationName("Optimizador de Funciones")

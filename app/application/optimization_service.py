@@ -223,7 +223,7 @@ def _run_method_impl(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
                       mo_alpha: Optional[float] = None):
     _init_algorithm_modules()
     newton_armijo_fn = getattr(_line_search_nd, "newton_armijo",            None) if _line_search_nd else None
-    newton_wolfe_fn  = getattr(_line_search_nd, "newton_wolfe_step",         None) if _line_search_nd else None
+    newton_wolfe_fn  = getattr(_line_search_nd, "newton_wolfe",              None) if _line_search_nd else None
     fibonacci_fn     = getattr(_local_search,   "fibonacci_search",          None) if _local_search   else None
     local_fn         = getattr(_local_search,   "local_neighborhood_search", None) if _local_search   else None
     _heuristics_mod_ = _heuristics_mod
@@ -328,8 +328,8 @@ def _run_method_impl(metodo, fx, gx, vars_, x0, lo, hi, tol_L,
         v_names  = _detect_vars(norm_fx)
         x0_use   = _get_x0_for(v_names)
         xo, yo, log = newton_wolfe_fn(
-            func_str=norm_fx, var_str=" ".join(v_names),
-            x_k_list=x0_use, u_in=lo, v_in=hi, mu=0.6)
+            func_str=norm_fx, var_str=" ".join(v_names), x0=x0_use,
+            max_iter=100, tolerance=1e-6)
         return log or [], None
 
     # ── BISECCIÓN y SECCIÓN DORADA (autónomas, sin módulos externos) ───────

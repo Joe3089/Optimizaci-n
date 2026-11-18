@@ -39,7 +39,7 @@ dict(nombre="Fibonacci", categoria=CATEGORIES[0],
     formula="Reducción de intervalo con razones de Fibonacci: x₁=a+(F_{N-2}/F_N)(b−a), x₂=a+(F_{N-1}/F_N)(b−a).",
     descripcion="Búsqueda de sección 1D que minimiza el número de evaluaciones de f para una tolerancia objetivo dada.",
     requisitos="Función unimodal en [lo,hi] (un único mínimo en el intervalo) para garantía teórica de convergencia.",
-    convergencia="El parámetro L (tolerancia) fija cuántos términos de Fibonacci se generan (objetivo = (b−a)/L); óptimamente eficiente en número de evaluaciones para funciones unimodales.",
+    convergencia="El parámetro L (tolerancia) fija cuántos términos de Fibonacci se generan (objetivo = (b−a)/L); óptimamente eficiente en número de evaluaciones para funciones unimodales. En cada iteración λₖ y μₖ quedan dentro de [aₖ, bₖ]; la última fila de la tabla registra el resultado x* = (a+b)/2 del intervalo final.",
     ventajas="Mínimo número de evaluaciones de f entre los métodos de reducción de intervalo; determinístico.",
     desventajas="Requiere unimodalidad — en funciones con varios mínimos puede converger a uno subóptimo sin avisar.",
     cuando_usar="Funciones costosas de evaluar, unimodales, 1 variable.",
@@ -127,17 +127,17 @@ dict(nombre="Armijo", categoria=CATEGORIES[1],
     ejemplo="f(x1,x2) = 2(x1−3)²+x1·x2³, con x0=[0,0]"),
 
 dict(nombre="Wolfe", categoria=CATEGORIES[1],
-    formula="Newton con condición de curvatura fuerte: |∇f(x+αd)ᵀd| ≤ μ·|∇f(x)ᵀd|, μ=0.6, resuelta por bisección en α∈[0,1].",
-    descripcion="Newton multivariable con búsqueda de línea que garantiza curvatura adecuada (evita pasos demasiado cortos), vía bisección — no incluye la condición de descenso suficiente por separado (queda desacoplada de Armijo en esta implementación).",
+    formula="x_{k+1} = x_k + α_k·d_k, con d_k de Newton (o −∇f si el Hessiano no da descenso) y α_k que cumple Wolfe fuerte: f(x+αd) ≤ f(x) + c₁α∇fᵀd y |∇f(x+αd)ᵀd| ≤ c₂|∇f(x)ᵀd|, c₁=1e-4, c₂=0.9.",
+    descripcion="Método de Newton multivariable completo cuya longitud de paso satisface las dos condiciones de Wolfe (descenso suficiente y curvatura), buscada por expansión y bisección.",
     requisitos="f diferenciable (gradiente y Hessiano exactos); acepta 1 o más variables.",
-    convergencia="Bisección detiene si la condición de curvatura se cumple o el intervalo (v−u) < 1e-7, máx. 20 iteraciones internas.",
-    ventajas="Evita pasos demasiado cortos, favoreciendo avance más agresivo que Armijo puro.",
-    desventajas="Al no combinar explícitamente la condición de descenso suficiente en el mismo paso, no es un Wolfe estándar de libro de texto (fuerte/débil) sino una variante simplificada centrada en curvatura.",
-    cuando_usar="Funciones diferenciables donde Armijo converge muy lento (pasos demasiado cortos).",
+    convergencia="Itera hasta ‖∇f‖ < 1e-6 o 100 iteraciones; convergencia cuadrática cerca del óptimo cuando el Hessiano es definido positivo.",
+    ventajas="Pasos ni demasiado largos ni demasiado cortos; respaldo de descenso por gradiente si el Hessiano es indefinido o singular.",
+    desventajas="Requiere Hessiano simbólico; cada iteración resuelve un sistema lineal.",
+    cuando_usar="Funciones diferenciables de varias variables donde Armijo da pasos demasiado cortos.",
     cuando_no_usar="Funciones no diferenciables.",
     compatibles="Funciones diferenciables, cualquier número de variables.",
     incompatibles="Funciones no derivables en la trayectoria.",
-    ejemplo="f(x1,x2) = 2(x1−3)²+x1·x2³, con x0=[0,0]"),
+    ejemplo="Rosenbrock (1−x)²+100(y−x²)² con x0=[−1, 1] → x* = (1, 1), f* ≈ 0 en 20 iteraciones"),
 
 dict(nombre="SA: Recocido Simulado", categoria=CATEGORIES[2],
     formula="Enfriamiento geométrico T←0.95·T; vecino x'=x+N(0,0.3); acepta si ΔE<0, o con prob. exp(−ΔE/T).",
@@ -507,5 +507,133 @@ AI_IMPLEMENTATION = [
      "(no en un servidor propio). Las conversaciones no se registran ni "
      "envían a ningún servidor del proyecto — solo se transmiten al "
      "proveedor de IA (Groq u OpenRouter) que el propio usuario configuró, "
-     "bajo los términos de esos servicios."),
+     "bajo los términos de esos servicios; si ambos fallan, al servicio sin "
+     "clave Pollinations, con la opción de privacidad activada."),
+    ("Respaldo sin clave y cupos de los proveedores",
+     "Si Groq está bloqueado por la red (403) o OpenRouter agotó su cupo gratuito "
+     "diario, el proveedor se marca como bloqueado (Groq 30 min; OpenRouter hasta la "
+     "medianoche UTC) para no repetir solicitudes inútiles, y el chat sigue "
+     "respondiendo con Pollinations (sin clave, hasta 3 intentos ante errores "
+     "transitorios). OpenRouter usa como máximo 3 modelos gratuitos de su lista "
+     "pública, actualizada cada 6 horas."),
+    ("Opti: identidad e intervención automática",
+     "El asistente se llama Opti. Tras cada cálculo, el detector clasifica el resultado "
+     "(éxito, no convergencia, infinito, NaN, desbordamiento, error de dominio, división "
+     "entre cero, sintaxis o ejecución; un valor negativo o un mínimo local no son "
+     "errores). Ante un problema, Opti abre el chat, saluda (presentándose solo la "
+     "primera vez en la sesión), explica la causa, recomienda una corrección e invita a "
+     "preguntar por texto o micrófono, por escrito y en voz sin superponer locuciones. "
+     "Un cálculo nuevo interrumpe la voz anterior, las respuestas tardías se descartan y "
+     "el mismo evento repetido en menos de 2 s no vuelve a intervenir. Opti nunca "
+     "modifica la función del usuario ni ejecuta código."),
+    ("Cuándo interviene Opti y cuándo no",
+     "Opti interviene por su cuenta solo cuando la entrada o el resultado son incorrectos "
+     "(función inválida, parámetros incorrectos, dominio, división entre cero, ∞, NaN, "
+     "desbordamiento, error de ejecución o falta de convergencia). Con un resultado "
+     "correcto no consulta la IA, no habla y no abre el chat: el recuadro muestra el "
+     "resumen del motor. La IA solo responde si el usuario le escribe, le habla o pulsa "
+     "«Explicar»."),
+]
+
+
+# Dashboard: sincronización con el método, tablas y visualizaciones
+# (app/ui/main_window.py, app/ui/dashboard_views.py, app/ui/result_box.py).
+DASHBOARD_IMPLEMENTATION = [
+    ("Recuadro de resultado dentro del chat de Opti",
+     "El recuadro con el resultado o el error del motor (función, método, rango, "
+     "punto problemático, causa y recomendación, con los botones de voz, detener, "
+     "repetir y texto) existe una sola vez y vive en el área de mensajes del chat "
+     "de Opti, sobre la conversación y separado por un divisor ajustable. La "
+     "explicación escrita aparece una sola vez —como mensaje de Opti— y el botón 📄 "
+     "permite mostrarla también en el recuadro. Tras cada cálculo el panel se abre "
+     "con el ancho necesario para que el recuadro sea visible."),
+    ("Actualización inmediata al cambiar de método",
+     "Al elegir otro método, la tabla, las gráficas 2D/3D y el recuadro del método "
+     "anterior se descartan de inmediato y la línea de estado del dashboard indica el "
+     "método seleccionado. Tras 350 ms (para agrupar cambios rápidos) se recalcula con "
+     "la función y los parámetros actuales. Si faltan datos (f(x), g(x) o la función "
+     "de inventario) se indica qué falta en lugar de abrir ventanas modales. Cada "
+     "corrida tiene un número de generación: un cálculo que termina después de que el "
+     "usuario eligió otro método se descarta y nunca sobrescribe al más reciente. Si un "
+     "cálculo falla, el dashboard queda vacío con el motivo: nunca muestra resultados "
+     "de una ejecución anterior."),
+    ("Cálculo sin bloquear la interfaz",
+     "El motor matemático se ejecuta en un QThread (dashboard_views.run_in_thread) "
+     "mientras un bucle de eventos local mantiene la ventana respondiendo; para el "
+     "código que lo llama sigue siendo síncrono, así que la validación, el detector de "
+     "eventos y Opti no cambian. El dibujo de tablas y gráficas se hace en el hilo de "
+     "la interfaz, como exige Qt."),
+    ("Una sola fuente de datos por ejecución",
+     "La tabla, las gráficas, el resumen y el recuadro consumen el mismo historial que "
+     "devuelve el motor. Las columnas son las de cada método (iteración, punto, f, "
+     "gradiente, tamaño de paso, dirección, intervalo [aₖ, bₖ], condiciones de "
+     "aceptación…), con encabezados legibles; una columna que repite exactamente el "
+     "mismo dato con otro nombre se omite. Los puntos de cada iteración se leen del "
+     "historial en cualquiera de sus formatos (número, vector o texto «[x1 x2]»), lo "
+     "que da trayectoria a Goldstein, Newton-Raphson, Gradiente Conjugado, SA, PSO, GA "
+     "y Sección Áurea. En las metaheurísticas, si la última fila no es la mejor, el "
+     "marcador final se rotula «Último xₖ» con el mejor f encontrado."),
+    ("Gráficas 2D",
+     "Para 1 variable: f(x), los puntos reales de cada iteración, x₀, el óptimo y, en "
+     "los métodos de intervalo, el intervalo inicial y el final. Para 2 variables: "
+     "curvas de nivel con la trayectoria. El rango se amplía para incluir todos los "
+     "puntos del algoritmo. Los métodos de programación lineal sin gráfica propia "
+     "(Simplex y variantes) muestran la región factible, sus vértices y el óptimo "
+     "calculado por el Simplex; con más de 2 variables, los valores óptimos."),
+    ("Gráficas 3D con validez matemática",
+     "2 variables: superficie f(x1, x2) con la trayectoria real. 1 variable: superficie "
+     "de evolución cuyos ejes son la iteración real k, x y f(x); cada franja es f sobre "
+     "el intervalo [aₖ, bₖ] que reporta el método (o sobre el rango de búsqueda si el "
+     "método no usa intervalo). Más de 2 variables: no se inventan valores para las "
+     "demás; se muestra la convergencia real de f y se explica por qué no hay "
+     "superficie. Catálogo: Z = c·x sobre la región factible (PL con 2 variables y punto "
+     "interior con su trayectoria), envíos x_ij del transporte, matriz de costos con la "
+     "asignación húngara y esfera de Bloch. Estadística: densidad estimada de la muestra "
+     "f̂ₕ(x) según el ancho de banda h (descriptiva), margen de error E(n, nivel) del "
+     "intervalo de confianza, densidad t según los grados de libertad con el t observado, "
+     "superficie SSE(β₀, β₁) de mínimos cuadrados (regresión simple) o plano ajustado (2 "
+     "variables), simulaciones reales de Monte Carlo y cota de Chebyshev según el "
+     "intervalo (a, b). Los demás métodos indican por qué no tienen una representación 3D "
+     "con significado."),
+    ("Datos propios del usuario en todos los métodos",
+     "Todos los métodos —los 32 con f(x), los 4 modelos de inventario y los del catálogo de "
+     "Estadística, Investigación de Operaciones y Optimización— tienen la barra «📂 Cargar "
+     "archivo · 📋 Usar ejemplo»; vaciar los datos y exportar los resultados se hace con los "
+     "botones azules «Limpiar» y «Exportar». Los formularios arrancan vacíos y "
+     "no se calcula nada hasta que el usuario ingresa su problema. Archivos admitidos: CSV o "
+     "TXT (coma, punto y coma —con coma decimal— o tabulador), Excel (.xlsx), Word (.docx, "
+     "párrafos o tablas) y PDF (texto). Se reconocen líneas «campo: valor» (p. ej. «f(x): "
+     "x**2 - 4*x + 5», «x0: 1», «rango: 0, 5», «g(x): x1+x2-2», «Demanda anual (D): 1000», "
+     "«tramo: 100, 9») y tablas numéricas para los campos de datos; un archivo de una sola "
+     "línea se toma como f(x). Del archivo solo se copia texto a los campos: nada se "
+     "ejecuta y el parser matemático seguro lo valida al calcular. «Exportar» recolecta "
+     "los resultados en CSV, Excel, PDF o Word."),
+    ("Gráficas 3D giratorias y leyendas interactivas",
+     "Todas las vistas 3D de todos los métodos giran solas y se pueden girar a mano "
+     "arrastrándolas con el ratón (el giro automático se pausa mientras se arrastra). Todos "
+     "los recuadros de leyenda, en 2D y en 3D, se pueden seleccionar y arrastrar a una zona "
+     "de la gráfica donde no estorben; con doble clic se contraen a «▸ Leyenda» y con otro "
+     "doble clic se expanden en el mismo lugar. Ese doble clic no dispara el recálculo por "
+     "clic en la gráfica."),
+    ("Archivos con varios ejercicios",
+     "Si el archivo cargado (Word, PDF, Excel, CSV o TXT) contiene varios ejercicios —"
+     "separados por encabezados como «Ejercicio 1», «Problema 2», «Caso 3», «Pregunta 4» o "
+     "«Actividad 5», o, en Excel, uno por hoja—, se abre un cuadro que muestra cada "
+     "ejercicio con una vista previa de su contenido para elegir cuál estudiar, con los "
+     "botones Aceptar y Cancelar. Aceptar carga solo ese ejercicio en el método; Cancelar "
+     "no cambia los datos. Funciona en los métodos con f(x), en inventario y en el catálogo."),
+    ("Distribución de la pantalla",
+     "Los divisores no permiten aplastar un panel hasta cortarlo: panel de control ≥ 280 px, "
+     "dashboard ≥ 460 px y Opti ≥ 300 px de ancho; tabla ≥ 110 px y gráficas 2D/3D ≥ 170 px "
+     "de alto. El panel de control y el de Opti se desplazan verticalmente en lugar de "
+     "recortar controles, y los textos largos (títulos, avisos, nombre de la función en "
+     "«Explicar») se ajustan de línea sin ensanchar el panel."),
+    ("Verificación automática",
+     "tests/test_dashboard_sync.py recorre por cambio de método los 32 métodos con f(x) "
+     "y todos los del catálogo, y comprueba que cada celda de la tabla coincide con el "
+     "historial del motor, que cada punto dibujado es una iteración real, que el "
+     "marcador del óptimo coincide con la última iteración, que la vista 3D usa los "
+     "mismos puntos, que no quedan datos del método anterior, que un resultado obsoleto "
+     "se descarta y que recalcular no duplica filas. También verifica el ejemplo de "
+     "Chebyshev (μ = 50, σ = 10, k = 2 → al menos 75 % en [30, 70])."),
 ]
