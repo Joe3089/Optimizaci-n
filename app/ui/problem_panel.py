@@ -165,12 +165,41 @@ class ProblemPanel(QtWidgets.QFrame):
             except ValueError as ex:
                 QtWidgets.QMessageBox.warning(self, "Cargar archivo", str(ex))
 
+    @staticmethod
+    def _names(f):
+        names = {di.norm_key(f.key), di.norm_key(f.label.split("(")[0])}
+        names.discard("")
+        return names
+
+    def _field_for(self, k: str):
+        for f in self._spec.fields:
+            names = self._names(f)
+            if k in names or (len(k) >= 3 and any(n.startswith(k) for n in names)):
+                return f
+        return None
+
+    def _sections(self, lines: List[str]) -> Dict[str, str]:
+        """«Variables:» / «Restricciones:» sin valor en la misma línea abren una
+        sección: las líneas siguientes son su contenido hasta otro campo conocido."""
+        out: Dict[str, List[str]] = {}
+        cur = None
+        for ln in lines:
+            m = re.match(r"^\s*([^:=]{1,60}?)\s*[:=]\s*(.*)$", ln)
+            f = self._field_for(di.norm_key(m.group(1))) if m else None
+            if f is not None:
+                cur = f.key if (f.kind == "text" and not m.group(2).strip()) else None
+                if cur:
+                    out[cur] = []
+                continue
+            if cur and ln.strip():
+                out[cur].append(ln.strip())
+        return {k: "\n".join(v) for k, v in out.items() if v}
+
     def _match(self, pairs: Dict[str, str]) -> Dict[str, str]:
         """Asigna cada «clave: valor» del archivo al campo con esa clave o etiqueta."""
         out: Dict[str, str] = {}
         for f in self._spec.fields:
-            names = {di.norm_key(f.key), di.norm_key(f.label.split("(")[0])}
-            names.discard("")
+            names = self._names(f)
             for k, v in pairs.items():
                 if k in names or (len(k) >= 3 and any(n.startswith(k) for n in names)):
                     if f.kind == "choice":
@@ -212,6 +241,7 @@ class ProblemPanel(QtWidgets.QFrame):
                 filled = [text_f.key]
         else:
             values = self._match(di.read_pairs(path))
+            values.update(self._sections(di.read_text_lines(path)))
             text_f = next((f for f in fields if f.kind == "text" and f.key not in values), None)
             if text_f is not None:
                 rows = [r for r in di.read_table(path) if all(di.is_number(c) for c in r if c)]

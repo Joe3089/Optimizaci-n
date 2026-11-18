@@ -189,6 +189,8 @@ def _style3d(ax, title):
 def problem_plot3d(label: str, group: str, values: Dict[str, str], res: Dict[str, Any]
                    ) -> Tuple[Optional[Callable], str]:
     """(dibujar(fig), explicación de los ejes) o (None, motivo de no tener 3D)."""
+    if callable(res.get("plot3d")):
+        return res["plot3d"], res.get("note3d", "")
     try:
         if label in _LP_LABELS:
             return _lp3d(label, values, res)

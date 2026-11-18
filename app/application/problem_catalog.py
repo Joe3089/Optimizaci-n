@@ -15,6 +15,7 @@ from app.operations_research import assignment as asg
 from app.operations_research import dynamic_programming as dp
 from app.operations_research import linear_programming as lp
 from app.operations_research import transportation as tr
+from app.optimization import advanced_metaheuristics as amh
 from app.optimization import combinatorial as comb
 from app.optimization import interior_point as ip
 from app.optimization import quantum as qc
@@ -386,6 +387,44 @@ SPECS: List[ProblemSpec] = [
     ProblemSpec("Problema de Máximo Corte", SECTION_OPT, "Optimización Combinatoria",
                 "Divide los nodos en dos grupos maximizando el peso entre grupos. NP-duro.",
                 [Field("aristas", "Aristas (nodo nodo peso):", "text", _T_GRAPH)], _maxcut),
+
+    # ── Metaheurísticas avanzadas ────────────────────────────────────────────
+    ProblemSpec("Metaheurística: Problema General", SECTION_OPT, "Metaheurísticas avanzadas",
+                "Cualquier f(x) de n variables, minimizar o maximizar, con variables reales, "
+                "enteras o binarias y restricciones ≤, ≥ o =. Variables: una por línea "
+                "(x1: -5, 5 · x2: entera 0, 10 · x3: binaria · todas: -10, 10).",
+                [Field("sentido", "Objetivo:", "choice", "Minimizar", tuple(_SENSE)),
+                 Field("fx", "Función objetivo f(x):", "line",
+                       "(x1 - 2)**2 + (x2 - 3)**2 + x3**2"),
+                 Field("variables", "Variables y cotas (una por línea):", "text",
+                       "x1: -5, 5\nx2: -5, 5\nx3: entera -3, 3"),
+                 Field("restricciones", "Restricciones (una por línea, opcional):", "text",
+                       "x1 + x2 <= 4"),
+                 Field("algoritmo", "Algoritmo:", "choice", "Comparar todos", amh.ALGORITHMS),
+                 Field("iter", "Iteraciones:", "line", "200"),
+                 Field("pob", "Población / vecinos por iteración:", "line", "30"), _F_SEED],
+                lambda v: amh.solve_general(v["sentido"], v["fx"], v["variables"],
+                                            v.get("restricciones", ""), v["algoritmo"],
+                                            integer(v["iter"], "Iteraciones"),
+                                            integer(v["pob"], "Población"),
+                                            integer(v["semilla"], "Semilla"))),
+    ProblemSpec("Metaheurística: Viajante (TSP grande)", SECTION_OPT, "Metaheurísticas avanzadas",
+                "Rutas de hasta 300 ciudades con Colonia de Hormigas, Recocido Simulado (2-opt) "
+                "o Algoritmo Genético (cruce OX). Escribe las ciudades (x, y por línea) o indica "
+                "cuántas generar al azar.",
+                [Field("xy", "Ciudades (x, y por línea):", "text",
+                       "\n".join(f"{a:g}, {b:g}" for a, b in amh.random_cities(30, 42))),
+                 Field("aleatorias", "O genera N ciudades al azar:", "line", ""),
+                 Field("algoritmo", "Algoritmo:", "choice", "Colonia de Hormigas (ACO)",
+                       amh.TSP_ALGORITHMS),
+                 Field("iter", "Iteraciones:", "line", "100"),
+                 Field("agentes", "Hormigas / población / movimientos:", "line", "20"), _F_SEED],
+                lambda v: amh.solve_tsp(
+                    matrix(v["xy"], "las ciudades") if v.get("xy", "").strip()
+                    else amh.random_cities(integer(v.get("aleatorias", ""), "N ciudades"),
+                                           integer(v["semilla"], "Semilla")),
+                    v["algoritmo"], integer(v["iter"], "Iteraciones"),
+                    integer(v["agentes"], "Agentes"), integer(v["semilla"], "Semilla"))),
 
     # ── Optimización cuántica ────────────────────────────────────────────────
     ProblemSpec("Cuántica: Cambio de Paradigma", SECTION_OPT, "Optimización Cuántica",
