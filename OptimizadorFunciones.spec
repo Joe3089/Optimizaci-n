@@ -72,6 +72,7 @@ a = Analysis(
         'app.optimization.combinatorial',
         'app.optimization.quantum',
         'app.optimization.advanced_metaheuristics',
+        'app.optimization.meta_extra',
         'scipy.stats',
         'app.infrastructure.reporting.csv_export',
         'app.infrastructure.reporting.xlsx_export',

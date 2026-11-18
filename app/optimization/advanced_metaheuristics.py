@@ -211,6 +211,7 @@ class _Recorder:
         self.best_o, self.best_v = np.inf, np.inf
         self.rows: List[Tuple[int, np.ndarray, float, float]] = []
         self.evals = 0
+        self.polished = False
 
     def offer(self, X, obj, viol):
         i = _best_index(obj, viol)
@@ -307,51 +308,142 @@ def genetic(p, iters, pop, rng, pc=0.9, elite=2):
     return rec
 
 
+def _disc_delta(p: Problem, j: np.ndarray, delta: np.ndarray) -> np.ndarray:
+    """En variables enteras/binarias el paso se redondea a ±1 como mínimo (si no,
+    el redondeo anularía el movimiento)."""
+    disc = np.array([p.vars[int(k)].kind != "real" for k in np.atleast_1d(j)])
+    if not disc.any():
+        return delta
+    d2 = np.array(delta, dtype=float)
+    sgn = np.where(d2 == 0, 1.0, np.sign(d2))
+    d2[disc] = sgn[disc] * np.maximum(1.0, np.round(np.abs(d2[disc])))
+    return d2
+
+
+def _energy(o, v):
+    return o + 1e6 * v                      # energía penalizada (SA / Tabú / pulido)
+
+
 def annealing(p, iters, pop, rng):
+    """Recocido Simulado con intercambio de réplicas (parallel tempering): K
+    cadenas a temperaturas geométricas que se enfrían juntas; cada movimiento
+    cambia una variable con paso propio adaptado (~44 % de aceptación) y las
+    cadenas vecinas intercambian estados con el criterio de Metropolis."""
     rec = _Recorder(p, "Recocido Simulado")
+    d = len(p.vars)
     span = p.hi - p.lo
-    x = _init_pop(p, 1, rng)
-    o, v = _eval(p, x, rec)
-    E = lambda oo, vv: oo + 1e6 * vv                 # noqa: E731  (energía penalizada)
-    e = float(E(o, v)[0])
-    T0 = max(abs(e), 1.0); rec.log(0)
+    K = int(min(max(4, pop // 4), 12))
+    ar = np.arange(K)
+    X = _init_pop(p, K, rng)
+    o, v = _eval(p, X, rec)
+    E = _energy(o, v)
+    fin = E[np.isfinite(E)]
+    T0 = float(np.std(fin)) if fin.size > 1 and np.std(fin) > 0 else 1.0
+    ladder = T0 * np.geomspace(1.0, 1e-2, K)
+    step = np.tile(span * 0.25, (K, 1))
+    moves = max(2, pop)
+    rec.log(0)
     for it in range(1, iters + 1):
-        T = T0 * (0.001 ** (it / iters))
-        for _ in range(pop):                          # pop movimientos por temperatura
-            step = span * (0.25 * T / T0 + 0.002)
-            y = p.repair(x + rng.normal(0, 1, x.shape) * step)
-            oy, vy = _eval(p, y, rec)
-            ey = float(E(oy, vy)[0])
-            if ey <= e or rng.random() < math.exp(-(ey - e) / max(T, 1e-12)):
-                x, e = y, ey
+        T = ladder * (1e-3 ** (it / iters))
+        acc = np.zeros(K)
+        for _ in range(moves):
+            j = rng.integers(0, d, K)
+            Y = X.copy()
+            Y[ar, j] += _disc_delta(p, j, (rng.random(K) * 2 - 1) * step[ar, j])
+            Y = p.repair(Y)
+            oy, vy = _eval(p, Y, rec)
+            ey = _energy(oy, vy)
+            with np.errstate(over="ignore", invalid="ignore"):
+                ok = (ey <= E) | (rng.random(K) < np.exp(-(ey - E) / np.maximum(T, 1e-300)))
+            X[ok], E[ok] = Y[ok], ey[ok]
+            acc += ok
+        rate = acc / moves
+        step = np.clip(step * np.where(rate > 0.44, 1.3, 0.75)[:, None], span * 1e-8, span)
+        for k in range(it % 2, K - 1, 2):                 # intercambio de réplicas
+            dlt = (1 / T[k] - 1 / T[k + 1]) * (E[k] - E[k + 1])
+            if np.isfinite(dlt) and (dlt >= 0 or rng.random() < math.exp(dlt)):
+                X[[k, k + 1]] = X[[k + 1, k]]
+                E[[k, k + 1]] = E[[k + 1, k]]
         rec.log(it)
     return rec
 
 
 def tabu_search(p, iters, pop, rng):
+    """Búsqueda Tabú por coordenadas: vecinos que mueven una variable ±paso,
+    atributo tabú (variable, dirección), aspiración, intensificación (paso más
+    fino) y diversificación (reinicio) ante estancamiento."""
     rec = _Recorder(p, "Búsqueda Tabú")
+    d = len(p.vars)
     span = p.hi - p.lo
     x = _init_pop(p, 1, rng)[0]
     _eval(p, x[None, :], rec)
-    tabu: List[np.ndarray] = []
-    radius = 0.02 * np.linalg.norm(span)
+    step = span * 0.2
+    tenure = max(3, int(round(math.sqrt(2 * d))))
+    tabu: Dict[Tuple[int, int], int] = {}
+    stall, best_seen = 0, rec.best_o + 1e6 * rec.best_v
     rec.log(0)
     for it in range(1, iters + 1):
-        step = span * (0.2 * (1 - it / (iters + 1)) + 0.005)
-        N = p.repair(x + rng.normal(0, 1, (pop, len(x))) * step)
+        m = max(2, pop)
+        js = rng.integers(0, d, m)
+        sg = rng.choice((-1, 1), m)
+        N = np.repeat(x[None, :], m, axis=0)
+        N[np.arange(m), js] += _disc_delta(p, js, sg * step[js] * (0.5 + rng.random(m)))
+        N = p.repair(N)
         o, v = _eval(p, N, rec)
-        ok = np.array([all(np.linalg.norm(n - t) > radius for t in tabu) for n in N])
-        # aspiración: un vecino tabú se acepta si mejora al mejor global
-        asp = _better(o, v, np.full_like(o, rec.best_o), np.full_like(v, rec.best_v))
-        cand = np.where(ok | asp)[0]
-        if cand.size == 0:
-            cand = np.arange(len(N))
-        i = cand[_best_index(o[cand], v[cand])]
-        tabu.append(x.copy())
-        tabu[:] = tabu[-max(7, len(x) * 3):]
-        x = N[i]
+        en = _energy(o, v)
+        best_e = rec.best_o + 1e6 * rec.best_v
+        allowed = np.array([tabu.get((int(j), int(-s_)), 0) < it or en[k] < best_e
+                            for k, (j, s_) in enumerate(zip(js, sg))])
+        cand = np.where(allowed)[0] if allowed.any() else np.arange(m)
+        k = int(cand[np.argmin(en[cand])])
+        x = N[k]
+        tabu[(int(js[k]), int(sg[k]))] = it + tenure      # prohíbe deshacer el movimiento
+        cur = rec.best_o + 1e6 * rec.best_v
+        if cur < best_seen - 1e-12:
+            best_seen, stall = cur, 0
+        else:
+            stall += 1
+        if stall and stall % max(8, iters // 30) == 0:
+            step = np.maximum(step * 0.5, span * 1e-7)       # intensificación
+        if stall > max(20, iters // 8):                      # diversificación
+            x = p.repair((rec.best_x + (rng.random(d) * 2 - 1) * span * 0.15)[None, :])[0]
+            step = span * 0.2; tabu.clear(); stall = 0
         rec.log(it)
     return rec
+
+
+def polish(p: Problem, x0: np.ndarray, o0: float, v0: float):
+    """Pulido local (L-BFGS-B sin restricciones / Powell con ellas) sobre las
+    variables reales; se acepta solo si mejora según las reglas de Deb."""
+    real = np.array([v.kind == "real" for v in p.vars])
+    if not real.any():
+        return x0, o0, v0
+    try:
+        from scipy.optimize import minimize
+    except ImportError:
+        return x0, o0, v0
+    base = x0.copy()
+
+    def full(z):
+        y = base.copy(); y[real] = z
+        return p.repair(y[None, :])
+
+    def energy(z):
+        _, o, v = p.evaluate(full(z))
+        val = float(_energy(o, v)[0])
+        return val if math.isfinite(val) else 1e300
+    bnds = list(zip(p.lo[real], p.hi[real]))
+    method = "L-BFGS-B" if not p.g else "Powell"
+    try:
+        r = minimize(energy, x0[real], method=method, bounds=bnds,
+                     options={"maxiter": 2000})
+    except Exception:
+        return x0, o0, v0
+    y = full(r.x)
+    _, o1, v1 = p.evaluate(y)
+    if _better(o1[0], v1[0], o0, v0):
+        return y[0], float(o1[0]), float(v1[0])
+    return x0, o0, v0
 
 
 _RUNNERS = {"Evolución Diferencial": differential_evolution,
@@ -366,7 +458,8 @@ def _fmt_x(p: Problem, x) -> str:
 
 
 def solve_general(sense: str, objective: str, variables: str, constraints: str, algorithm: str,
-                  iterations: int, population: int, seed: int) -> Dict[str, Any]:
+                  iterations: int, population: int, seed: int, runs: int = 1,
+                  local_polish: bool = True) -> Dict[str, Any]:
     if algorithm not in ALGORITHMS:
         raise ValueError(f"Algoritmo desconocido: «{algorithm}».")
     if not 10 <= iterations <= 20000:
@@ -376,10 +469,29 @@ def solve_general(sense: str, objective: str, variables: str, constraints: str, 
     p = parse_problem(objective, sense, variables, constraints)
     if len(p.vars) > 200:
         raise ValueError("El máximo admitido es 200 variables.")
+    if not 1 <= runs <= 100:
+        raise ValueError("Las ejecuciones independientes deben estar entre 1 y 100.")
     names = list(_RUNNERS) if algorithm == "Comparar todos" else [algorithm]
     recs = {}
+    stats: Dict[str, Dict[str, float]] = {}
     for name in names:
-        recs[name] = _RUNNERS[name](p, iterations, population, np.random.default_rng(seed))
+        outs = []
+        for r_ in range(runs):                     # semillas seed, seed+1, …
+            rec = _RUNNERS[name](p, iterations, population, np.random.default_rng(seed + r_))
+            if local_polish:
+                x1, o1, v1 = polish(p, rec.best_x, rec.best_o, rec.best_v)
+                if (x1 is not rec.best_x) and (o1, v1) != (rec.best_o, rec.best_v):
+                    rec.best_x, rec.best_o, rec.best_v = x1, o1, v1
+                    rec.log(rec.rows[-1][0] + 1)     # fila «pulido local»
+                    rec.polished = True
+            outs.append(rec)
+        best_run = min(outs, key=lambda r: (r.best_v > 0, r.best_v if r.best_v > 0 else r.best_o))
+        recs[name] = best_run
+        vals = np.array([p.sense * r.best_o for r in outs if r.best_v <= 0])
+        stats[name] = {"runs": runs, "factibles": int(vals.size),
+                       "mejor": float(p.sense * best_run.best_o),
+                       "media": float(vals.mean()) if vals.size else float("nan"),
+                       "desv": float(vals.std(ddof=1)) if vals.size > 1 else 0.0}
     best_name = min(names, key=lambda n: (recs[n].best_v > 0, recs[n].best_v
                                           if recs[n].best_v > 0 else recs[n].best_o))
     best = recs[best_name]
@@ -402,12 +514,20 @@ def solve_general(sense: str, objective: str, variables: str, constraints: str, 
             row["Factible"] = "Sí" if v <= 0 else "No"
             row["Mejor x"] = _fmt_x(p, x)
             rows.append(row)
-    if len(names) > 1:
+    if len(names) > 1 or runs > 1:
         for name in names:
             r = recs[name]
-            rows.append({"Iteración": "final", "Algoritmo": name, "Mejor f": p.sense * r.best_o,
-                         "Violación": r.best_v, "Factible": "Sí" if r.best_v <= 0 else "No",
-                         "Mejor x": _fmt_x(p, r.best_x)})
+            row = {"Iteración": "final"}
+            if len(names) > 1:
+                row["Algoritmo"] = name
+            row.update({"Mejor f": p.sense * r.best_o, "Violación": r.best_v,
+                        "Factible": "Sí" if r.best_v <= 0 else "No",
+                        "Mejor x": _fmt_x(p, r.best_x)})
+            if runs > 1:
+                st = stats[name]
+                row["Ejecuciones"] = (f"{st['factibles']}/{runs} factibles · media "
+                                      f"{st['media']:.6g} · desv. {st['desv']:.3g}")
+            rows.append(row)
 
     curves = {n: (np.array([r[0] for r in recs[n].rows]),
                   np.array([p.sense * r[2] for r in recs[n].rows]),
@@ -487,8 +607,8 @@ def solve_general(sense: str, objective: str, variables: str, constraints: str, 
     return {"x": best.best_x.tolist(), "f": f_best, "feasible": feasible,
             "violation": best.best_v, "algorithm": best_name, "names": p.names,
             "results": {n: {"f": p.sense * recs[n].best_o, "violation": recs[n].best_v,
-                            "x": recs[n].best_x.tolist(), "evals": recs[n].evals}
-                        for n in names},
+                            "x": recs[n].best_x.tolist(), "evals": recs[n].evals,
+                            **stats[n]} for n in names},
             "hist": rows, "resumen": resumen, "plot": plot, "plot3d": plot3d, "note3d": note}
 
 

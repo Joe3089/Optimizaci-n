@@ -100,3 +100,115 @@ def test_catalog_integration():
         assert label in SPEC_BY_LABEL
         res = solve(label, defaults(label))
         assert res["hist"] and res["resumen"] and callable(res["plot3d"])
+
+
+# ── Limitaciones resueltas ────────────────────────────────────────────────────
+from app.optimization import meta_extra as mx  # noqa: E402
+
+RASTRIGIN10 = "+".join(f"(x{i}**2 - 10*cos(2*pi*x{i}) + 10)" for i in range(1, 11))
+ACKLEY10 = ("-20*exp(-0.2*sqrt((" + "+".join(f"x{i}**2" for i in range(1, 11)) + ")/10)) - exp(("
+            + "+".join(f"cos(2*pi*x{i})" for i in range(1, 11)) + ")/10) + 20 + E")
+
+
+def test_tabu_reaches_rastrigin_global():
+    r = am.solve_general("Minimizar", RASTRIGIN10, "todas: -5.12, 5.12", "",
+                         "Búsqueda Tabú", 600, 60, 1)
+    assert r["f"] < 1e-6, r["resumen"]
+
+
+def test_annealing_much_better_on_rastrigin():
+    # antes del rediseño el Recocido Simulado quedaba en ~32
+    r = am.solve_general("Minimizar", RASTRIGIN10, "todas: -5.12, 5.12", "",
+                         "Recocido Simulado", 600, 60, 2)
+    assert r["f"] < 10, r["resumen"]
+
+
+@pytest.mark.parametrize("alg", CONT)
+def test_ackley_10d_all_algorithms(alg):
+    r = am.solve_general("Minimizar", ACKLEY10, "todas: -32, 32", "", alg, 600, 60, 2)
+    assert r["f"] < 1e-6, r["resumen"]
+
+
+@pytest.mark.parametrize("alg", CONT)
+def test_discrete_moves_all_algorithms(alg):
+    r = am.solve_general("Maximizar", "60*x1 + 100*x2 + 120*x3", "todas: binaria",
+                         "10*x1 + 20*x2 + 30*x3 <= 50", alg, 100, 20, 3)
+    q = am.solve_general("Minimizar", "(x1-7)**2 + (x2+4)**2", "todas: entera -10, 10", "",
+                         alg, 100, 20, 3)
+    assert r["f"] == 220 and q["x"] == [7, -4]
+
+
+def test_independent_runs_statistics():
+    r = am.solve_general("Minimizar", "(x1-2)**2 + (x2-3)**2 + x3**2",
+                         "x1: -5, 5\nx2: -5, 5\nx3: entera -3, 3", "x1 + x2 <= 4",
+                         "Evolución Diferencial", 150, 30, 42, runs=5)
+    st = r["results"]["Evolución Diferencial"]
+    assert st["runs"] == 5 and st["factibles"] == 5 and abs(st["media"] - 0.5) < 0.01
+    assert any("Ejecuciones" in h for h in r["hist"])
+
+
+def test_nsga2_zdt1_true_front():
+    g = "(1 + 9*(" + "+".join(f"x{i}" for i in range(2, 31)) + ")/29)"
+    r = mx.solve_multiobjective(f"min: x1\nmin: {g}*(1 - sqrt(x1/{g}))", "todas: 0, 1", "",
+                                250, 100, 1)
+    F = np.array(r["front"])
+    assert np.abs(F[:, 1] - (1 - np.sqrt(F[:, 0]))).mean() < 0.02
+    assert F[:, 0].min() < 0.01 and F[:, 0].max() > 0.99 and r["hypervolume"] > 0.85
+
+
+def test_nsga2_schaffer_and_constraints():
+    r = mx.solve_multiobjective("min: x**2\nmin: (x-2)**2", "x: -10, 10", "", 100, 60, 1)
+    X = np.array(r["x"]).ravel()
+    assert X.min() > -1e-2 and X.max() < 2.01 and X.max() - X.min() > 1.9
+    r = mx.solve_multiobjective("max: x1 + x2\nmin: x1**2 + x2**2", "todas: 0, 5",
+                                "x1 + 2*x2 <= 6", 100, 60, 1)
+    assert all(a + 2 * b <= 6 + 1e-9 for a, b in r["x"])
+
+
+@pytest.mark.parametrize("alg", mx.VRP_ALGORITHMS[:-1])
+def test_cvrp_matches_brute_force(alg):
+    rng = np.random.default_rng(3)
+    cust = [[*np.round(rng.random(2) * 100, 1), int(rng.integers(1, 10))] for _ in range(7)]
+    exact = mx.brute_force_vrp([50, 50], cust, 15)
+    r = mx.solve_vrp([50, 50], cust, 15, 0, alg, 80, 20, 1)
+    assert r["cost"] == pytest.approx(exact, rel=1e-9)
+    assert all(sum(cust[c - 1][2] for c in route) <= 15 for route in r["routes"])
+    assert sorted(c for route in r["routes"] for c in route) == list(range(1, 8))
+
+
+def test_cvrp_fleet_limit_and_validation():
+    cust = [[10, 10, 5], [20, 20, 5], [80, 80, 5], [90, 90, 5]]
+    r = mx.solve_vrp([50, 50], cust, 10, 2, "Comparar todos", 40, 10, 1)
+    assert len(r["routes"]) <= 2 and r["feasible"]
+    with pytest.raises(ValueError, match="supera la capacidad de la flota"):
+        mx.solve_vrp([50, 50], cust, 10, 1, "Recocido Simulado", 10, 5, 1)
+    with pytest.raises(ValueError, match="supera la capacidad de un vehículo"):
+        mx.solve_vrp([50, 50], [[1, 1, 50], [2, 2, 1]], 10, 0, "Recocido Simulado", 10, 5, 1)
+
+
+@pytest.mark.parametrize("alg", mx.FLOW_ALGORITHMS[:-1])
+def test_flow_shop_matches_brute_force(alg):
+    import itertools
+    P = np.random.default_rng(5).integers(1, 20, (6, 4)).astype(float)
+    exact = min(mx.flow_makespan(P, p) for p in itertools.permutations(range(6)))
+    data = "\n".join(", ".join(f"{v:g}" for v in row) for row in P)
+    assert mx.solve_scheduling("Flow shop", data, alg, 60, 20, 1)["makespan"] == exact
+
+
+@pytest.mark.parametrize("alg", mx.JOB_ALGORITHMS[:-1])
+def test_job_shop_ft06_optimum(alg):
+    r = mx.solve_scheduling("Job shop", mx.FT06, alg, 300, 40, 1)
+    assert r["makespan"] == 55                      # óptimo conocido de FT06
+    ops = r["operations"]
+    for m in {o[1] for o in ops}:                   # sin solapes por máquina
+        iv = sorted((s, e) for _, mm, s, e in ops if mm == m)
+        assert all(a[1] <= b[0] + 1e-9 for a, b in zip(iv, iv[1:]))
+
+
+def test_new_catalog_entries():
+    from app.application.problem_catalog import SPEC_BY_LABEL, defaults, solve
+    for label in ("Metaheurística: Multiobjetivo (NSGA-II)",
+                  "Metaheurística: Ruteo de Vehículos (CVRP)",
+                  "Metaheurística: Programación de Tareas"):
+        res = solve(label, defaults(label))
+        assert res["hist"] and res["resumen"] and callable(res["plot3d"])
